@@ -107,12 +107,15 @@ def create_composite_frame(
     """
     canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
     banner_h = 50
-    footer_h = 35
-    main_h = canvas_h - banner_h - footer_h
+    footer_h = 40
+    main_h = canvas_h - banner_h - footer_h  # 720 - 50 - 40 = 630
+    half_h = main_h // 2                     # 315
+    bottom_h = main_h - half_h               # 315
 
     # Width partitions: Left window (65%), Right panel (35%)
     left_w = int(canvas_w * 0.65)
     right_w = canvas_w - left_w
+    r_x0 = left_w
 
     # 1. Left Window: Spectator Overview
     if spectator_rgb is not None:
@@ -131,9 +134,6 @@ def create_composite_frame(
     )
 
     # 2. Right Side Panel: Stacked Front RGB (top) and Depth (bottom)
-    half_h = main_h // 2
-    r_x0 = left_w
-
     # Top right: Front RGB
     if front_rgb is not None:
         if front_rgb.shape[-1] == 4:
@@ -149,8 +149,8 @@ def create_composite_frame(
     # Bottom right: Front Depth
     if front_depth is not None:
         depth_color = colorize_depth(front_depth)
-        depth_resized = cv2.resize(depth_color, (right_w, half_h), interpolation=cv2.INTER_LINEAR)
-        canvas[banner_h + half_h : banner_h + main_h, r_x0:canvas_w] = depth_resized
+        depth_resized = cv2.resize(depth_color, (right_w, bottom_h), interpolation=cv2.INTER_LINEAR)
+        canvas[banner_h + half_h : banner_h + half_h + bottom_h, r_x0:canvas_w] = depth_resized
 
     cv2.putText(
         canvas, "ROBOT DEPTH (distance_to_image_plane)", (r_x0 + 15, banner_h + half_h + 25),

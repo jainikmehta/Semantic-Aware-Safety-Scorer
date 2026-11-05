@@ -522,6 +522,7 @@ class AlleyEnv:
             width=int(cam_cfg["width"]),
             height=int(cam_cfg["height"]),
             data_types=list(cam_cfg["data_types"]),
+            update_latest_camera_pose=True,
             spawn=sim_utils.PinholeCameraCfg(
                 focal_length=24.0,
                 focus_distance=400.0,
@@ -549,6 +550,7 @@ class AlleyEnv:
                 width=int(spec_cfg["width"]),
                 height=int(spec_cfg["height"]),
                 data_types=["rgb"],
+                update_latest_camera_pose=True,
                 spawn=sim_utils.PinholeCameraCfg(
                     focal_length=20.0,
                     focus_distance=400.0,
@@ -683,23 +685,34 @@ class AlleyEnv:
             ], dtype=np.float32)
 
         # Camera extrinsics matrix (4x4 transform in world frame)
+        mount_pos = self.cfg["robot"]["camera"]["mount_pos"]
+        cam_world_x = self.robot_x + mount_pos[0] * math.cos(self.robot_theta)
+        cam_world_y = self.robot_y + mount_pos[0] * math.sin(self.robot_theta)
+        r_height = float(self.cfg["robot"]["chassis"]["height"])
+        cam_world_z = mount_pos[2] + r_height / 2.0 + self.wheel_radius
+
+        valid_cam_pose = False
         if cam_data.pos_w is not None and cam_data.quat_w_world is not None:
-            pos_cam = cam_data.pos_w[0].cpu().numpy()
-            quat_cam = cam_data.quat_w_world[0]  # (w, x, y, z)
-            R_mat = matrix_from_quat(quat_cam.unsqueeze(0))[0].cpu().numpy()
+            if not torch.isnan(cam_data.pos_w).any() and not torch.isnan(cam_data.quat_w_world).any():
+                q = cam_data.quat_w_world[0]
+                q_norm = torch.norm(q)
+                if q_norm > 0.5:
+                    q_normalized = q / q_norm
+                    R_mat = matrix_from_quat(q_normalized.unsqueeze(0))[0].cpu().numpy()
+                    if not np.isnan(R_mat).any():
+                        extrinsics = np.eye(4, dtype=np.float32)
+                        extrinsics[:3, :3] = R_mat
+                        extrinsics[:3, 3] = cam_data.pos_w[0].cpu().numpy()
+                        valid_cam_pose = True
+
+        if not valid_cam_pose:
+            cos_th = math.cos(self.robot_theta)
+            sin_th = math.sin(self.robot_theta)
             extrinsics = np.eye(4, dtype=np.float32)
-            extrinsics[:3, :3] = R_mat
-            extrinsics[:3, 3] = pos_cam
-        else:
-            mount_pos = self.cfg["robot"]["camera"]["mount_pos"]
-            cam_world_x = self.robot_x + mount_pos[0] * math.cos(self.robot_theta)
-            cam_world_y = self.robot_y + mount_pos[0] * math.sin(self.robot_theta)
-            cam_world_z = mount_pos[2]
-            extrinsics = np.eye(4, dtype=np.float32)
-            extrinsics[0, 0] = math.cos(self.robot_theta)
-            extrinsics[0, 1] = -math.sin(self.robot_theta)
-            extrinsics[1, 0] = math.sin(self.robot_theta)
-            extrinsics[1, 1] = math.cos(self.robot_theta)
+            extrinsics[0, 0] = cos_th
+            extrinsics[0, 1] = -sin_th
+            extrinsics[1, 0] = sin_th
+            extrinsics[1, 1] = cos_th
             extrinsics[:3, 3] = [cam_world_x, cam_world_y, cam_world_z]
 
         return {
