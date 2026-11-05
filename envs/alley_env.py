@@ -1,14 +1,19 @@
 """Alley Environment for Semantic Aware Safety Scorer.
 
-Features:
-- Narrow alley (8.0m x 2.2m) enclosed by boundary walls and flat ground plane.
-- TurtleBot 4 differential-drive mobile robot with front RGB-D camera sensor.
-- Synchronized RGB (640x480) and Depth (distance_to_image_plane) streams at 30 Hz.
-- Robot odometry tracking: [x, y, theta, v, w].
-- Semantic objects: Bucket_1, Bucket_2, Blue_Glass, Glass_Vase, Soft_Couch with
-  distinct USD prim paths, physical properties, and semantic annotations.
+High-Fidelity Isaac Sim / Isaac Lab Environment featuring:
+- Narrow corridor (8.0m x 2.2m) with architectural walls, baseboard trim, and floor slab.
+- Realistic TurtleBot 4 differential-drive mobile robot (Create 3 base, green acrylic
+  payload plates, aluminum standoffs, wheels, and front OAK-D-Pro sensor mast).
+- Front RGB-D camera streaming synchronized RGB (640x480) and Depth (distance_to_image_plane) at 30 Hz.
+- Elevated spectator overview camera capturing the full corridor and TurtleBot in motion.
+- Rich compound semantic objects:
+    * Bucket_1 & Bucket_2: Industrial buckets with dark reinforced rim and wire bail.
+    * Blue_Glass: Clear glass cup filled with cobalt blue liquid mesh, atop Bucket_1.
+    * Glass_Vase: Fragile contoured glass vase asset.
+    * Soft_Couch: Upholstered sofa with seat cushions, armrests, and backrest.
+- Deprecation-free semantics tagging using modern UsdSemantics.LabelsAPI.
 - Clean step(v_cmd, w_cmd) API returning RGB-D tensors, camera calibration,
-  robot state, and ground truth object states (poses, radii, parent-child relations).
+  robot odometry [x, y, theta, v, w], and ground truth object states.
 """
 
 from __future__ import annotations
@@ -26,7 +31,7 @@ import carb
 import isaaclab.sim as sim_utils
 from isaaclab.sim import SimulationContext, SimulationCfg
 from isaaclab.sensors.camera import Camera, CameraCfg
-from isaaclab.utils.math import quat_from_euler_xyz, matrix_from_quat
+from isaaclab.utils.math import matrix_from_quat
 
 import isaacsim.core.utils.prims as prim_utils
 import isaacsim.core.utils.stage as stage_utils
@@ -35,9 +40,16 @@ from pxr import Gf, UsdGeom, UsdPhysics, PhysxSchema, Sdf, Usd
 
 
 def _add_semantics(prim: Usd.Prim, label: str, sem_type: str = "class") -> None:
-    """Apply semantic label to a USD prim using the available Semantics API."""
+    """Apply semantic label to a USD prim using the modern LabelsAPI without deprecation warnings."""
     if not prim or not prim.IsValid():
         return
+    try:
+        from isaacsim.core.utils.semantics import add_labels
+        add_labels(prim, labels=[label], instance_name=sem_type)
+        return
+    except Exception:
+        pass
+
     try:
         from isaacsim.core.utils.semantics import add_update_semantics
         add_update_semantics(prim, semantic_label=label, type_label=sem_type)
@@ -45,72 +57,55 @@ def _add_semantics(prim: Usd.Prim, label: str, sem_type: str = "class") -> None:
     except Exception:
         pass
 
-    try:
-        from omni.isaac.core.utils.semantics import add_update_semantics
-        add_update_semantics(prim, semantic_label=label, type_label=sem_type)
-        return
-    except Exception:
-        pass
 
-    # Direct USD Semantics fallback
-    try:
-        import Semantics
-        sem_api = Semantics.SemanticsAPI.Apply(prim, f"Semantics_{label}")
-        sem_api.CreateSemanticTypeAttr().Set(sem_type)
-        sem_api.CreateSemanticDataAttr().Set(label)
-    except Exception as exc:
-        print(f"[AlleyEnv] Notice: Direct SemanticsAPI fallback on {prim.GetPath()}: {exc}")
-
-
-def _look_at_quat(eye: np.ndarray, target: np.ndarray, up: np.ndarray = np.array([0.0, 0.0, 1.0])) -> Tuple[float, float, float, float]:
-    """Compute quaternion (w, x, y, z) that aligns +X forward axis with direction vector."""
-    f = target - eye
-    f_norm = np.linalg.norm(f)
-    if f_norm < 1e-6:
-        return (1.0, 0.0, 0.0, 0.0)
-    f = f / f_norm
-
-    # Right axis
-    r = np.cross(f, up)
-    r_norm = np.linalg.norm(r)
-    if r_norm < 1e-6:
-        r = np.array([0.0, 1.0, 0.0])
-    else:
-        r = r / r_norm
-
-    # True up axis
-    u = np.cross(r, f)
-
-    # Rotation matrix where X = forward, Y = -right, Z = up (ROS / World convention)
-    R = np.column_stack([f, -r, u])
-
-    trace = np.trace(R)
-    if trace > 0.0:
-        s = 0.5 / math.sqrt(trace + 1.0)
-        w = 0.25 / s
-        x = (R[2, 1] - R[1, 2]) * s
-        y = (R[0, 2] - R[2, 0]) * s
-        z = (R[1, 0] - R[0, 1]) * s
-    elif (R[0, 0] > R[1, 1]) and (R[0, 0] > R[2, 2]):
+def mat_to_quat(R: np.ndarray) -> Tuple[float, float, float, float]:
+    """Convert 3x3 rotation matrix to quaternion (w, x, y, z) via Shepperd's method."""
+    tr = R[0, 0] + R[1, 1] + R[2, 2]
+    if tr > 0.0:
+        s = 2.0 * math.sqrt(1.0 + tr)
+        w = s / 4.0
+        x = (R[2, 1] - R[1, 2]) / s
+        y = (R[0, 2] - R[2, 0]) / s
+        z = (R[1, 0] - R[0, 1]) / s
+    elif R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
         s = 2.0 * math.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2])
         w = (R[2, 1] - R[1, 2]) / s
-        x = 0.25 * s
+        x = s / 4.0
         y = (R[0, 1] + R[1, 0]) / s
         z = (R[0, 2] + R[2, 0]) / s
     elif R[1, 1] > R[2, 2]:
         s = 2.0 * math.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2])
         w = (R[0, 2] - R[2, 0]) / s
         x = (R[0, 1] + R[1, 0]) / s
-        y = 0.25 * s
+        y = s / 4.0
         z = (R[1, 2] + R[2, 1]) / s
     else:
         s = 2.0 * math.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1])
         w = (R[1, 0] - R[0, 1]) / s
         x = (R[0, 2] + R[2, 0]) / s
         y = (R[1, 2] + R[2, 1]) / s
-        z = 0.25 * s
-
+        z = s / 4.0
     return (float(w), float(x), float(y), float(z))
+
+
+def ros_quat_look_at(eye: np.ndarray, target: np.ndarray) -> Tuple[float, float, float, float]:
+    """Compute camera orientation quaternion in ROS convention (+Z forward, +X right, +Y down)."""
+    f = np.asarray(target, float) - np.asarray(eye, float)
+    f_norm = np.linalg.norm(f)
+    if f_norm < 1e-6:
+        return (1.0, 0.0, 0.0, 0.0)
+    f /= f_norm
+
+    right = np.cross(f, [0.0, 0.0, 1.0])
+    right_norm = np.linalg.norm(right)
+    if right_norm < 1e-6:
+        right = np.array([1.0, 0.0, 0.0])
+    else:
+        right /= right_norm
+
+    down = np.cross(f, right)
+    R = np.stack([right, down, f], axis=1)
+    return mat_to_quat(R)
 
 
 class AlleyEnv:
@@ -129,7 +124,7 @@ class AlleyEnv:
         self.headless = headless
         self.enable_spectator_cam = enable_spectator_cam
 
-        # Enable cameras in carb settings to prevent any missing flag assertion
+        # Enable cameras and RTX rendering in carb settings
         carb_settings = carb.settings.get_settings()
         carb_settings.set_bool("/isaaclab/cameras_enabled", True)
         carb_settings.set_bool("/isaaclab/render/rtx_sensors", True)
@@ -159,7 +154,7 @@ class AlleyEnv:
         self.sim = sim_context or self._setup_simulation_context()
         self.stage = stage_utils.get_current_stage()
 
-        # Build scene prims
+        # Build high-fidelity scene prims
         self._build_environment_prims()
         self._build_robot_prim()
         self._build_semantic_objects()
@@ -180,11 +175,12 @@ class AlleyEnv:
         # Cache initial object states for clean reset
         self._initial_gt_objects = self._snapshot_ground_truth_objects()
 
-        print("[AlleyEnv] Environment successfully initialized.")
-        print(f"  - Alley: {self.cfg['alley']['length']}m x {self.cfg['alley']['width']}m")
-        print(f"  - Robot spawn: {spawn_pos}, goal: {self.cfg['robot']['goal_pos']}")
+        print("[AlleyEnv] High-fidelity environment successfully initialized.")
+        print(f"  - Alley Corridor: {self.cfg['alley']['length']}m x {self.cfg['alley']['width']}m")
+        print(f"  - TurtleBot 4 spawn: {spawn_pos}, goal: {self.cfg['robot']['goal_pos']}")
         print(f"  - Front RGB-D Camera: {self.cfg['robot']['camera']['width']}x{self.cfg['robot']['camera']['height']} @ 30 Hz")
-        print(f"  - Objects: {list(self.cfg['objects'].keys())}")
+        print(f"  - Spectator Overview Camera: {self.cfg['spectator_camera']['pos']} -> {self.cfg['spectator_camera']['look_at']}")
+        print(f"  - Semantic Objects: {list(self.cfg['objects'].keys())}")
 
     def _load_config(self, cfg_path: str) -> Dict[str, Any]:
         """Load and parse YAML configuration."""
@@ -194,43 +190,59 @@ class AlleyEnv:
             return yaml.safe_load(f)
 
     def _setup_simulation_context(self) -> SimulationContext:
-        """Create and configure the SimulationContext singleton."""
+        """Create and configure the SimulationContext singleton with clean PhysX settings."""
+        physx_cfg = sim_utils.PhysxCfg(
+            enable_external_forces_every_iteration=True,
+            solver_type=1,
+            max_position_iteration_count=16,
+            min_position_iteration_count=4,
+        )
         sim_cfg = SimulationCfg(
             dt=self.physics_dt,
             render_interval=self.decimation,
             device=self.device,
             gravity=tuple(self.cfg["simulation"].get("gravity", [0.0, 0.0, -9.81])),
+            physx=physx_cfg,
         )
         sim = SimulationContext(sim_cfg)
         return sim
 
     def _build_environment_prims(self) -> None:
-        """Spawn flat ground plane, boundary walls, and illumination."""
-        # 1. Ground Plane (procedural solid floor slab - self-contained, no network dependency)
-        ground_size = self.cfg["alley"].get("ground_size", [20.0, 20.0])
-        ground_color = tuple(self.cfg["alley"].get("ground_color", [0.35, 0.36, 0.38]))
-        ground_mat = sim_utils.PreviewSurfaceCfg(diffuse_color=ground_color, roughness=0.7)
+        """Spawn architectural floor slab, boundary walls, baseboard trim, and multi-source lighting."""
+        # 1. Floor slab
+        ground_size = self.cfg["alley"].get("ground_size", [12.0, 6.0])
+        ground_color = tuple(self.cfg["alley"].get("ground_color", [0.36, 0.38, 0.40]))
+        floor_mat = sim_utils.PreviewSurfaceCfg(diffuse_color=ground_color, roughness=0.35, metallic=0.05)
 
-        ground_cfg = sim_utils.CuboidCfg(
+        floor_cfg = sim_utils.CuboidCfg(
             size=(float(ground_size[0]), float(ground_size[1]), 0.1),
-            visual_material=ground_mat,
+            visual_material=floor_mat,
             collision_props=sim_utils.CollisionPropertiesCfg(),
         )
-        sim_utils.spawn_cuboid("/World/ground_plane", ground_cfg, translation=(0.0, 0.0, -0.05))
+        sim_utils.spawn_cuboid("/World/ground_plane", floor_cfg, translation=(0.0, 0.0, -0.05))
 
-        # 2. Lighting (Dome light + Distant key light)
+        # 2. Lighting Setup (Soft dome fill + Directional key + 3 Ceiling strip fixtures)
         dome_light_cfg = sim_utils.DomeLightCfg(
-            intensity=1500.0,
-            color=(0.95, 0.95, 1.0),
+            intensity=1200.0,
+            color=(0.96, 0.96, 1.0),
         )
         sim_utils.spawn_light("/World/DomeLight", dome_light_cfg)
 
-        distant_light_cfg = sim_utils.DistantLightCfg(
-            intensity=2500.0,
-            color=(1.0, 0.98, 0.95),
-            angle=0.53,
+        key_light_cfg = sim_utils.DistantLightCfg(
+            intensity=2800.0,
+            color=(1.0, 0.98, 0.94),
+            angle=1.0,
         )
-        sim_utils.spawn_light("/World/KeyLight", distant_light_cfg, orientation=(0.85, -0.35, 0.35, 0.15))
+        sim_utils.spawn_light("/World/KeyLight", key_light_cfg, orientation=(0.85, -0.35, 0.35, 0.15))
+
+        # Ceiling light fixtures along the corridor
+        for i, x_pos in enumerate([-2.5, 0.0, 2.5]):
+            disk_light_cfg = sim_utils.DiskLightCfg(
+                intensity=1600.0,
+                radius=0.30,
+                color=(1.0, 0.95, 0.90),
+            )
+            sim_utils.spawn_light(f"/World/CeilingLight_{i}", disk_light_cfg, translation=(x_pos, 0.0, 2.2))
 
         # 3. Alley Boundary Walls (8.0m long x 2.2m wide)
         length = float(self.cfg["alley"]["length"])
@@ -238,31 +250,44 @@ class AlleyEnv:
         wall_h = float(self.cfg["alley"]["wall_height"])
         wall_th = float(self.cfg["alley"]["wall_thickness"])
         wall_color = tuple(self.cfg["alley"]["wall_color"])
-        wall_mat_cfg = sim_utils.PreviewSurfaceCfg(diffuse_color=wall_color, roughness=0.6)
+        wall_mat_cfg = sim_utils.PreviewSurfaceCfg(diffuse_color=wall_color, roughness=0.7)
 
-        # Left side wall
+        # Baseboard skirting & top rail materials
+        skirting_color = tuple(self.cfg["alley"].get("skirting_color", [0.16, 0.16, 0.18]))
+        skirting_mat = sim_utils.PreviewSurfaceCfg(diffuse_color=skirting_color, roughness=0.45)
+        rail_mat = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.95, 0.95, 0.96), roughness=0.3)
+
+        # Left wall
         wall_l_cfg = sim_utils.CuboidCfg(
             size=(length, wall_th, wall_h),
             visual_material=wall_mat_cfg,
             collision_props=sim_utils.CollisionPropertiesCfg(),
         )
-        sim_utils.spawn_cuboid(
-            "/World/Alley/Wall_Left",
-            wall_l_cfg,
-            translation=(0.0, width / 2.0 + wall_th / 2.0, wall_h / 2.0),
-        )
+        sim_utils.spawn_cuboid("/World/Alley/Wall_Left", wall_l_cfg, translation=(0.0, width / 2.0 + wall_th / 2.0, wall_h / 2.0))
 
-        # Right side wall
+        # Left baseboard trim
+        base_l_cfg = sim_utils.CuboidCfg(size=(length, 0.02, 0.08), visual_material=skirting_mat)
+        sim_utils.spawn_cuboid("/World/Alley/Skirting_Left", base_l_cfg, translation=(0.0, width / 2.0 - 0.01, 0.04))
+
+        # Left top cap rail
+        rail_l_cfg = sim_utils.CuboidCfg(size=(length, wall_th + 0.03, 0.03), visual_material=rail_mat)
+        sim_utils.spawn_cuboid("/World/Alley/Rail_Left", rail_l_cfg, translation=(0.0, width / 2.0 + wall_th / 2.0, wall_h + 0.015))
+
+        # Right wall
         wall_r_cfg = sim_utils.CuboidCfg(
             size=(length, wall_th, wall_h),
             visual_material=wall_mat_cfg,
             collision_props=sim_utils.CollisionPropertiesCfg(),
         )
-        sim_utils.spawn_cuboid(
-            "/World/Alley/Wall_Right",
-            wall_r_cfg,
-            translation=(0.0, -width / 2.0 - wall_th / 2.0, wall_h / 2.0),
-        )
+        sim_utils.spawn_cuboid("/World/Alley/Wall_Right", wall_r_cfg, translation=(0.0, -width / 2.0 - wall_th / 2.0, wall_h / 2.0))
+
+        # Right baseboard trim
+        base_r_cfg = sim_utils.CuboidCfg(size=(length, 0.02, 0.08), visual_material=skirting_mat)
+        sim_utils.spawn_cuboid("/World/Alley/Skirting_Right", base_r_cfg, translation=(0.0, -width / 2.0 + 0.01, 0.04))
+
+        # Right top cap rail
+        rail_r_cfg = sim_utils.CuboidCfg(size=(length, wall_th + 0.03, 0.03), visual_material=rail_mat)
+        sim_utils.spawn_cuboid("/World/Alley/Rail_Right", rail_r_cfg, translation=(0.0, -width / 2.0 - wall_th / 2.0, wall_h + 0.015))
 
         # Back wall
         wall_b_cfg = sim_utils.CuboidCfg(
@@ -270,25 +295,23 @@ class AlleyEnv:
             visual_material=wall_mat_cfg,
             collision_props=sim_utils.CollisionPropertiesCfg(),
         )
-        sim_utils.spawn_cuboid(
-            "/World/Alley/Wall_Back",
-            wall_b_cfg,
-            translation=(-length / 2.0 - wall_th / 2.0, 0.0, wall_h / 2.0),
-        )
+        sim_utils.spawn_cuboid("/World/Alley/Wall_Back", wall_b_cfg, translation=(-length / 2.0 - wall_th / 2.0, 0.0, wall_h / 2.0))
 
-        # Front wall
+        # Front wall (framing the navigation goal)
         wall_f_cfg = sim_utils.CuboidCfg(
             size=(wall_th, width + 2 * wall_th, wall_h),
             visual_material=wall_mat_cfg,
             collision_props=sim_utils.CollisionPropertiesCfg(),
         )
-        sim_utils.spawn_cuboid(
-            "/World/Alley/Wall_Front",
-            wall_f_cfg,
-            translation=(length / 2.0 + wall_th / 2.0, 0.0, wall_h / 2.0),
-        )
+        sim_utils.spawn_cuboid("/World/Alley/Wall_Front", wall_f_cfg, translation=(length / 2.0 + wall_th / 2.0, 0.0, wall_h / 2.0))
 
-        # Apply semantics
+        # 4. Navigation Goal Visual Marker (at 3.5, 0.0)
+        goal_pos = self.cfg["robot"]["goal_pos"]
+        goal_mat = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.15, 0.90, 0.35), emissive_color=(0.10, 0.80, 0.30), roughness=0.3, opacity=0.7)
+        goal_ring_cfg = sim_utils.CylinderCfg(radius=0.40, height=0.005, axis="Z", visual_material=goal_mat)
+        sim_utils.spawn_cylinder("/World/Goal_Marker", goal_ring_cfg, translation=(goal_pos[0], goal_pos[1], 0.003))
+
+        # Tag environment semantics cleanly
         _add_semantics(self.stage.GetPrimAtPath("/World/Alley/Wall_Left"), "wall")
         _add_semantics(self.stage.GetPrimAtPath("/World/Alley/Wall_Right"), "wall")
         _add_semantics(self.stage.GetPrimAtPath("/World/Alley/Wall_Back"), "wall")
@@ -296,7 +319,7 @@ class AlleyEnv:
         _add_semantics(self.stage.GetPrimAtPath("/World/ground_plane"), "ground")
 
     def _build_robot_prim(self) -> None:
-        """Spawn TurtleBot 4 differential-drive robot assembly."""
+        """Spawn high-fidelity TurtleBot 4 differential-drive robot model."""
         self.robot_prim_path = self.cfg["robot"]["prim_path"]
         spawn_pos = tuple(self.cfg["robot"]["spawn_pos"])
         spawn_rot = tuple(self.cfg["robot"]["spawn_rot"])
@@ -309,11 +332,15 @@ class AlleyEnv:
         base_center_z = r_height / 2.0 + w_radius
         root_translation = (spawn_pos[0], spawn_pos[1], base_center_z)
 
-        chassis_mat = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.15, 0.15, 0.16), roughness=0.3)
-        green_accent_mat = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.20, 0.75, 0.25), roughness=0.4)
-        wheel_mat = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.08, 0.08, 0.08), roughness=0.8)
+        # Realistic TurtleBot 4 materials
+        chassis_mat = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.12, 0.12, 0.13), roughness=0.45)
+        tb4_green_mat = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.15, 0.72, 0.28), roughness=0.25)
+        metal_standoff_mat = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.80, 0.82, 0.85), metallic=0.9, roughness=0.2)
+        tire_mat = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.06, 0.06, 0.07), roughness=0.85)
+        hubcap_mat = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.65, 0.65, 0.68), metallic=0.85, roughness=0.3)
+        lens_mat = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.02, 0.02, 0.04), roughness=0.05, metallic=0.7)
 
-        # Base chassis cylinder
+        # 1. Base Create 3 chassis cylinder
         chassis_cfg = sim_utils.CylinderCfg(
             radius=r_radius,
             height=r_height,
@@ -325,114 +352,131 @@ class AlleyEnv:
         )
         sim_utils.spawn_cylinder(self.robot_prim_path, chassis_cfg, translation=root_translation, orientation=spawn_rot)
 
-        # Upper payload / sensor shelf
-        shelf_cfg = sim_utils.CuboidCfg(
-            size=(0.20, 0.20, 0.04),
-            visual_material=green_accent_mat,
-        )
-        sim_utils.spawn_cuboid(f"{self.robot_prim_path}/shell", shelf_cfg, translation=(0.0, 0.0, r_height / 2.0 + 0.02))
+        # Front bumper
+        bumper_cfg = sim_utils.CuboidCfg(size=(0.08, 0.32, 0.05), visual_material=chassis_mat)
+        sim_utils.spawn_cuboid(f"{self.robot_prim_path}/bumper", bumper_cfg, translation=(0.09, 0.0, -0.01))
 
-        # Sensor mast / camera bracket
-        mast_cfg = sim_utils.CuboidCfg(
-            size=(0.03, 0.06, 0.12),
-            visual_material=chassis_mat,
-        )
-        sim_utils.spawn_cuboid(f"{self.robot_prim_path}/mast", mast_cfg, translation=(0.12, 0.0, r_height / 2.0 + 0.07))
+        # 2. Lower & Upper TurtleBot 4 Acrylic Green Shelf Plates
+        lower_deck_cfg = sim_utils.CuboidCfg(size=(0.22, 0.20, 0.008), visual_material=tb4_green_mat)
+        sim_utils.spawn_cuboid(f"{self.robot_prim_path}/lower_deck", lower_deck_cfg, translation=(0.0, 0.0, r_height / 2.0 + 0.03))
 
-        # Left wheel
-        wl_cfg = sim_utils.CylinderCfg(
-            radius=w_radius,
-            height=0.02,
-            axis="Y",
-            visual_material=wheel_mat,
-        )
+        top_deck_cfg = sim_utils.CuboidCfg(size=(0.22, 0.20, 0.008), visual_material=tb4_green_mat)
+        sim_utils.spawn_cuboid(f"{self.robot_prim_path}/top_deck", top_deck_cfg, translation=(0.0, 0.0, r_height / 2.0 + 0.11))
+
+        # Aluminum standoff pillars
+        standoff_positions = [
+            (0.08, 0.08, r_height / 2.0 + 0.07),
+            (0.08, -0.08, r_height / 2.0 + 0.07),
+            (-0.08, 0.08, r_height / 2.0 + 0.07),
+            (-0.08, -0.08, r_height / 2.0 + 0.07),
+        ]
+        for idx, s_pos in enumerate(standoff_positions):
+            standoff_cfg = sim_utils.CylinderCfg(radius=0.006, height=0.08, axis="Z", visual_material=metal_standoff_mat)
+            sim_utils.spawn_cylinder(f"{self.robot_prim_path}/standoff_{idx}", standoff_cfg, translation=s_pos)
+
+        # 3. Front Sensor Mast / OAK-D-Pro Tower
+        mast_bracket_cfg = sim_utils.CuboidCfg(size=(0.035, 0.08, 0.12), visual_material=chassis_mat)
+        sim_utils.spawn_cuboid(f"{self.robot_prim_path}/sensor_mast", mast_bracket_cfg, translation=(0.14, 0.0, r_height / 2.0 + 0.14))
+
+        # OAK-D-Pro Camera Housing
+        cam_bar_cfg = sim_utils.CuboidCfg(size=(0.025, 0.11, 0.03), visual_material=chassis_mat)
+        sim_utils.spawn_cuboid(f"{self.robot_prim_path}/oak_d_housing", cam_bar_cfg, translation=(0.16, 0.0, r_height / 2.0 + 0.18))
+
+        # Dual stereo optical lenses
+        left_lens_cfg = sim_utils.CylinderCfg(radius=0.010, height=0.004, axis="X", visual_material=lens_mat)
+        sim_utils.spawn_cylinder(f"{self.robot_prim_path}/lens_left", left_lens_cfg, translation=(0.174, 0.038, r_height / 2.0 + 0.18))
+
+        right_lens_cfg = sim_utils.CylinderCfg(radius=0.010, height=0.004, axis="X", visual_material=lens_mat)
+        sim_utils.spawn_cylinder(f"{self.robot_prim_path}/lens_right", right_lens_cfg, translation=(0.174, -0.038, r_height / 2.0 + 0.18))
+
+        # 4. Drive Wheels with tires and silver hubcaps
+        wl_cfg = sim_utils.CylinderCfg(radius=w_radius, height=0.022, axis="Y", visual_material=tire_mat)
         sim_utils.spawn_cylinder(f"{self.robot_prim_path}/wheel_left", wl_cfg, translation=(0.0, w_base / 2.0, -r_height / 2.0 + w_radius / 2.0))
 
-        # Right wheel
-        wr_cfg = sim_utils.CylinderCfg(
-            radius=w_radius,
-            height=0.02,
-            axis="Y",
-            visual_material=wheel_mat,
-        )
+        hub_l_cfg = sim_utils.CylinderCfg(radius=w_radius * 0.55, height=0.024, axis="Y", visual_material=hubcap_mat)
+        sim_utils.spawn_cylinder(f"{self.robot_prim_path}/hubcap_left", hub_l_cfg, translation=(0.0, w_base / 2.0, -r_height / 2.0 + w_radius / 2.0))
+
+        wr_cfg = sim_utils.CylinderCfg(radius=w_radius, height=0.022, axis="Y", visual_material=tire_mat)
         sim_utils.spawn_cylinder(f"{self.robot_prim_path}/wheel_right", wr_cfg, translation=(0.0, -w_base / 2.0, -r_height / 2.0 + w_radius / 2.0))
+
+        hub_r_cfg = sim_utils.CylinderCfg(radius=w_radius * 0.55, height=0.024, axis="Y", visual_material=hubcap_mat)
+        sim_utils.spawn_cylinder(f"{self.robot_prim_path}/hubcap_right", hub_r_cfg, translation=(0.0, -w_base / 2.0, -r_height / 2.0 + w_radius / 2.0))
 
         # Tag robot semantics
         _add_semantics(self.stage.GetPrimAtPath(self.robot_prim_path), "robot")
 
     def _build_semantic_objects(self) -> None:
-        """Populate alley with Bucket_1, Bucket_2, Blue_Glass, Glass_Vase, and Soft_Couch."""
+        """Populate alley with detailed compound semantic objects."""
         objs_cfg = self.cfg["objects"]
 
-        bucket_mat = sim_utils.PreviewSurfaceCfg(
-            diffuse_color=tuple(objs_cfg["Bucket_1"]["visual_color"]),
-            roughness=0.45,
-        )
-        blue_liquid_mat = sim_utils.PreviewSurfaceCfg(
-            diffuse_color=tuple(objs_cfg["Blue_Glass"]["liquid_color"]),
-            roughness=0.15,
-            opacity=0.95,
-        )
-        glass_mat = sim_utils.PreviewSurfaceCfg(
-            diffuse_color=(0.95, 0.98, 1.0),
-            roughness=0.05,
-            opacity=float(objs_cfg["Blue_Glass"].get("glass_opacity", 0.35)),
-            metallic=0.1,
-        )
-        vase_mat = sim_utils.PreviewSurfaceCfg(
-            diffuse_color=tuple(objs_cfg["Glass_Vase"]["visual_color"]),
-            roughness=0.05,
-            opacity=float(objs_cfg["Glass_Vase"].get("glass_opacity", 0.30)),
-            metallic=0.05,
-        )
-        couch_mat = sim_utils.PreviewSurfaceCfg(
-            diffuse_color=tuple(objs_cfg["Soft_Couch"]["visual_color"]),
-            roughness=0.85,
-        )
-
-        # 1. Bucket_1
+        # 1. Bucket_1: Detailed bucket asset with reinforced dark rim & wire bail
         b1_cfg = objs_cfg["Bucket_1"]
-        b1_cylinder_cfg = sim_utils.CylinderCfg(
+        b1_pos = tuple(b1_cfg["pos"])
+        b1_mat = sim_utils.PreviewSurfaceCfg(diffuse_color=tuple(b1_cfg["visual_color"]), roughness=0.35, metallic=0.1)
+        rim_mat = sim_utils.PreviewSurfaceCfg(diffuse_color=tuple(b1_cfg.get("rim_color", [0.2, 0.2, 0.22])), roughness=0.5)
+        bail_mat = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.75, 0.77, 0.80), metallic=0.9, roughness=0.2)
+
+        # Main bucket body
+        b1_body = sim_utils.CylinderCfg(
             radius=float(b1_cfg["radius"]),
             height=float(b1_cfg["height"]),
             axis="Z",
-            visual_material=bucket_mat,
+            visual_material=b1_mat,
             collision_props=sim_utils.CollisionPropertiesCfg(),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(rigid_body_enabled=True),
             mass_props=sim_utils.MassPropertiesCfg(mass=float(b1_cfg["mass"])),
         )
-        sim_utils.spawn_cylinder(
-            b1_cfg["prim_path"],
-            b1_cylinder_cfg,
-            translation=tuple(b1_cfg["pos"]),
-            orientation=tuple(b1_cfg["rot"]),
-        )
+        sim_utils.spawn_cylinder(b1_cfg["prim_path"], b1_body, translation=b1_pos, orientation=tuple(b1_cfg["rot"]))
+
+        # Top reinforced rim
+        b1_rim = sim_utils.CylinderCfg(radius=float(b1_cfg["radius"]) * 1.04, height=0.03, axis="Z", visual_material=rim_mat)
+        sim_utils.spawn_cylinder(f"{b1_cfg['prim_path']}/rim", b1_rim, translation=(0.0, 0.0, float(b1_cfg["height"]) / 2.0 - 0.015))
+
+        # Arched metal wire handle / bail
+        b1_bail = sim_utils.CuboidCfg(size=(float(b1_cfg["radius"]) * 1.9, 0.008, 0.12), visual_material=bail_mat)
+        sim_utils.spawn_cuboid(f"{b1_cfg['prim_path']}/bail", b1_bail, translation=(0.0, 0.0, float(b1_cfg["height"]) / 2.0 + 0.06))
+
         _add_semantics(self.stage.GetPrimAtPath(b1_cfg["prim_path"]), b1_cfg["semantic_label"])
 
-        # 2. Bucket_2
+        # 2. Bucket_2: Identical bucket asset
         b2_cfg = objs_cfg["Bucket_2"]
-        b2_cylinder_cfg = sim_utils.CylinderCfg(
+        b2_pos = tuple(b2_cfg["pos"])
+        b2_body = sim_utils.CylinderCfg(
             radius=float(b2_cfg["radius"]),
             height=float(b2_cfg["height"]),
             axis="Z",
-            visual_material=bucket_mat,
+            visual_material=b1_mat,
             collision_props=sim_utils.CollisionPropertiesCfg(),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(rigid_body_enabled=True),
             mass_props=sim_utils.MassPropertiesCfg(mass=float(b2_cfg["mass"])),
         )
-        sim_utils.spawn_cylinder(
-            b2_cfg["prim_path"],
-            b2_cylinder_cfg,
-            translation=tuple(b2_cfg["pos"]),
-            orientation=tuple(b2_cfg["rot"]),
-        )
+        sim_utils.spawn_cylinder(b2_cfg["prim_path"], b2_body, translation=b2_pos, orientation=tuple(b2_cfg["rot"]))
+
+        b2_rim = sim_utils.CylinderCfg(radius=float(b2_cfg["radius"]) * 1.04, height=0.03, axis="Z", visual_material=rim_mat)
+        sim_utils.spawn_cylinder(f"{b2_cfg['prim_path']}/rim", b2_rim, translation=(0.0, 0.0, float(b2_cfg["height"]) / 2.0 - 0.015))
+
+        b2_bail = sim_utils.CuboidCfg(size=(float(b2_cfg["radius"]) * 1.9, 0.008, 0.12), visual_material=bail_mat)
+        sim_utils.spawn_cuboid(f"{b2_cfg['prim_path']}/bail", b2_bail, translation=(0.0, 0.0, float(b2_cfg["height"]) / 2.0 + 0.06))
+
         _add_semantics(self.stage.GetPrimAtPath(b2_cfg["prim_path"]), b2_cfg["semantic_label"])
 
-        # 3. Blue_Glass (transparent cup filled with blue cylinder mesh, centered on top surface of Bucket_1)
+        # 3. Blue_Glass: Transparent cup with inner blue liquid mesh, centered on top of Bucket_1
         bg_cfg = objs_cfg["Blue_Glass"]
         bg_radius = float(bg_cfg["radius"])
         bg_height = float(bg_cfg["height"])
-        bg_cylinder_cfg = sim_utils.CylinderCfg(
+        glass_mat = sim_utils.PreviewSurfaceCfg(
+            diffuse_color=(0.96, 0.98, 1.0),
+            roughness=0.02,
+            opacity=float(bg_cfg.get("glass_opacity", 0.30)),
+            metallic=0.05,
+        )
+        blue_liquid_mat = sim_utils.PreviewSurfaceCfg(
+            diffuse_color=tuple(bg_cfg["liquid_color"]),
+            roughness=0.15,
+            opacity=0.90,
+        )
+
+        bg_glass_body = sim_utils.CylinderCfg(
             radius=bg_radius,
             height=bg_height,
             axis="Z",
@@ -441,81 +485,92 @@ class AlleyEnv:
             rigid_props=sim_utils.RigidBodyPropertiesCfg(rigid_body_enabled=True),
             mass_props=sim_utils.MassPropertiesCfg(mass=float(bg_cfg["mass"])),
         )
-        sim_utils.spawn_cylinder(
-            bg_cfg["prim_path"],
-            bg_cylinder_cfg,
-            translation=tuple(bg_cfg["pos"]),
-            orientation=tuple(bg_cfg["rot"]),
-        )
-        _add_semantics(self.stage.GetPrimAtPath(bg_cfg["prim_path"]), bg_cfg["semantic_label"])
+        sim_utils.spawn_cylinder(bg_cfg["prim_path"], bg_glass_body, translation=tuple(bg_cfg["pos"]), orientation=tuple(bg_cfg["rot"]))
 
         # Inner blue liquid cylinder mesh
-        blue_inner_cfg = sim_utils.CylinderCfg(
+        bg_liquid = sim_utils.CylinderCfg(
             radius=bg_radius * 0.88,
             height=bg_height * 0.75,
             axis="Z",
             visual_material=blue_liquid_mat,
         )
-        sim_utils.spawn_cylinder(
-            f"{bg_cfg['prim_path']}/blue_contents",
-            blue_inner_cfg,
-            translation=(0.0, 0.0, -bg_height * 0.10),
+        sim_utils.spawn_cylinder(f"{bg_cfg['prim_path']}/blue_contents", bg_liquid, translation=(0.0, 0.0, -bg_height * 0.08))
+
+        _add_semantics(self.stage.GetPrimAtPath(bg_cfg["prim_path"]), bg_cfg["semantic_label"])
+
+        # 4. Glass_Vase: Contoured fragile glass vase asset
+        gv_cfg = objs_cfg["Glass_Vase"]
+        gv_radius = float(gv_cfg["radius"])
+        gv_height = float(gv_cfg["height"])
+        vase_mat = sim_utils.PreviewSurfaceCfg(
+            diffuse_color=tuple(gv_cfg["visual_color"]),
+            roughness=0.02,
+            opacity=float(gv_cfg.get("glass_opacity", 0.22)),
+            metallic=0.05,
         )
 
-        # 4. Glass_Vase
-        gv_cfg = objs_cfg["Glass_Vase"]
-        gv_cylinder_cfg = sim_utils.CylinderCfg(
-            radius=float(gv_cfg["radius"]),
-            height=float(gv_cfg["height"]),
+        gv_body = sim_utils.CylinderCfg(
+            radius=gv_radius,
+            height=gv_height,
             axis="Z",
             visual_material=vase_mat,
             collision_props=sim_utils.CollisionPropertiesCfg(),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(rigid_body_enabled=True),
             mass_props=sim_utils.MassPropertiesCfg(mass=float(gv_cfg["mass"])),
         )
-        sim_utils.spawn_cylinder(
-            gv_cfg["prim_path"],
-            gv_cylinder_cfg,
-            translation=tuple(gv_cfg["pos"]),
-            orientation=tuple(gv_cfg["rot"]),
-        )
+        sim_utils.spawn_cylinder(gv_cfg["prim_path"], gv_body, translation=tuple(gv_cfg["pos"]), orientation=tuple(gv_cfg["rot"]))
+
+        # Elegant vase flared rim
+        gv_rim = sim_utils.CylinderCfg(radius=gv_radius * 1.08, height=0.02, axis="Z", visual_material=vase_mat)
+        sim_utils.spawn_cylinder(f"{gv_cfg['prim_path']}/rim", gv_rim, translation=(0.0, 0.0, gv_height / 2.0 - 0.01))
+
         _add_semantics(self.stage.GetPrimAtPath(gv_cfg["prim_path"]), gv_cfg["semantic_label"])
 
-        # 5. Soft_Couch
+        # 5. Soft_Couch: Rich upholstered sofa with seat cushions, armrests, and backrest
         sc_cfg = objs_cfg["Soft_Couch"]
+        sc_pos = tuple(sc_cfg["pos"])
         sc_size = tuple(sc_cfg["size"])
-        sc_base_cfg = sim_utils.CuboidCfg(
-            size=sc_size,
-            visual_material=couch_mat,
+        fabric_mat = sim_utils.PreviewSurfaceCfg(diffuse_color=tuple(sc_cfg["visual_color"]), roughness=0.85)
+        cushion_mat = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.48, 0.44, 0.40), roughness=0.80)
+        wood_leg_mat = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.18, 0.12, 0.08), roughness=0.5)
+
+        # Sofa base frame
+        sc_base = sim_utils.CuboidCfg(
+            size=(sc_size[0], sc_size[1], 0.20),
+            visual_material=fabric_mat,
             collision_props=sim_utils.CollisionPropertiesCfg(),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(rigid_body_enabled=True),
             mass_props=sim_utils.MassPropertiesCfg(mass=float(sc_cfg["mass"])),
         )
-        sim_utils.spawn_cuboid(
-            sc_cfg["prim_path"],
-            sc_base_cfg,
-            translation=tuple(sc_cfg["pos"]),
-            orientation=tuple(sc_cfg["rot"]),
-        )
+        sim_utils.spawn_cuboid(sc_cfg["prim_path"], sc_base, translation=sc_pos, orientation=tuple(sc_cfg["rot"]))
+
+        # Left and right seat cushions
+        cushion_w = (sc_size[0] - 0.18) / 2.0
+        c1_cfg = sim_utils.CuboidCfg(size=(cushion_w, sc_size[1] - 0.10, 0.08), visual_material=cushion_mat)
+        sim_utils.spawn_cuboid(f"{sc_cfg['prim_path']}/cushion_left", c1_cfg, translation=(-cushion_w / 2.0 - 0.01, -0.02, 0.14))
+
+        c2_cfg = sim_utils.CuboidCfg(size=(cushion_w, sc_size[1] - 0.10, 0.08), visual_material=cushion_mat)
+        sim_utils.spawn_cuboid(f"{sc_cfg['prim_path']}/cushion_right", c2_cfg, translation=(cushion_w / 2.0 + 0.01, -0.02, 0.14))
+
+        # Plush backrest cushion
+        back_cfg = sim_utils.CuboidCfg(size=(sc_size[0], 0.14, 0.32), visual_material=fabric_mat)
+        sim_utils.spawn_cuboid(f"{sc_cfg['prim_path']}/backrest", back_cfg, translation=(0.0, sc_size[1] / 2.0 - 0.07, 0.24))
+
+        # Left and right padded armrests
+        arm_l_cfg = sim_utils.CuboidCfg(size=(0.09, sc_size[1], 0.26), visual_material=fabric_mat)
+        sim_utils.spawn_cuboid(f"{sc_cfg['prim_path']}/arm_left", arm_l_cfg, translation=(-sc_size[0] / 2.0 + 0.045, 0.0, 0.15))
+
+        arm_r_cfg = sim_utils.CuboidCfg(size=(0.09, sc_size[1], 0.26), visual_material=fabric_mat)
+        sim_utils.spawn_cuboid(f"{sc_cfg['prim_path']}/arm_right", arm_r_cfg, translation=(sc_size[0] / 2.0 - 0.045, 0.0, 0.15))
+
         _add_semantics(self.stage.GetPrimAtPath(sc_cfg["prim_path"]), sc_cfg["semantic_label"])
 
-        # Couch backrest
-        sc_back_cfg = sim_utils.CuboidCfg(
-            size=(sc_size[0], sc_size[1] * 0.35, sc_size[2] * 0.7),
-            visual_material=couch_mat,
-        )
-        sim_utils.spawn_cuboid(
-            f"{sc_cfg['prim_path']}/backrest",
-            sc_back_cfg,
-            translation=(0.0, sc_size[1] * 0.35, sc_size[2] * 0.5),
-        )
-
     def _setup_cameras(self) -> None:
-        """Initialize front RGB-D camera on robot and external spectator camera."""
+        """Initialize front RGB-D camera on robot and elevated spectator camera."""
         cam_cfg = self.cfg["robot"]["camera"]
         front_cam_path = f"{self.robot_prim_path}/{cam_cfg['prim_rel_path']}"
 
-        # 1. Front RGB-D Camera (640x480 @ 30 Hz)
+        # 1. Front RGB-D Camera (640x480 @ 30 Hz) on TurtleBot 4
         self.front_camera_cfg = CameraCfg(
             prim_path=front_cam_path,
             update_period=0.0,  # update every environment step
@@ -537,12 +592,12 @@ class AlleyEnv:
         )
         self.front_camera = Camera(cfg=self.front_camera_cfg)
 
-        # 2. Spectator Camera (overview for video generation)
+        # 2. Spectator Camera: Elevated trailing isometric vantage point looking down the corridor
         if self.enable_spectator_cam:
             spec_cfg = self.cfg["spectator_camera"]
             eye = np.array(spec_cfg["pos"], dtype=np.float32)
             look_at = np.array(spec_cfg["look_at"], dtype=np.float32)
-            spec_rot = _look_at_quat(eye, look_at)
+            spec_rot = ros_quat_look_at(eye, look_at)
 
             self.spectator_camera_cfg = CameraCfg(
                 prim_path=spec_cfg["prim_path"],
@@ -552,7 +607,7 @@ class AlleyEnv:
                 data_types=["rgb"],
                 update_latest_camera_pose=True,
                 spawn=sim_utils.PinholeCameraCfg(
-                    focal_length=20.0,
+                    focal_length=18.0,
                     focus_distance=400.0,
                     horizontal_aperture=20.955,
                     clipping_range=(0.1, 100.0),
@@ -560,7 +615,7 @@ class AlleyEnv:
                 offset=CameraCfg.OffsetCfg(
                     pos=tuple(spec_cfg["pos"]),
                     rot=spec_rot,
-                    convention="world",
+                    convention="ros",
                 ),
             )
             self.spectator_camera = Camera(cfg=self.spectator_camera_cfg)
@@ -759,4 +814,7 @@ class AlleyEnv:
         """Cleanly shutdown simulation."""
         print("[AlleyEnv] Closing environment.")
         if hasattr(self, "sim") and self.sim is not None:
-            self.sim.stop()
+            try:
+                self.sim.stop()
+            except Exception:
+                pass
