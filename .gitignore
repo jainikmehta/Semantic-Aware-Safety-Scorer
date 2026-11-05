@@ -1,0 +1,35 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Conda / Virtualenv
+.env
+.venv
+env/
+venv/
+
+# Isaac Sim / Omniverse logs and cache
+*.log
+omni.*.log
+.local/
+kit/
+shadercache/
+
+# Video outputs & recordings
+recordings/*.mp4
+recordings/*.avi
+recordings/*.png
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Project outputs
+outputs/
+checkpoints/
+data/

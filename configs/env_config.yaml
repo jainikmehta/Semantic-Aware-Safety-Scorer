@@ -1,0 +1,123 @@
+# Semantic Aware Safety Scorer - Environment Configuration
+# Narrow Alley Environment with TurtleBot 4 and Semantic Objects
+
+alley:
+  length: 8.0          # Alley length along X-axis (m) [-4.0 to +4.0]
+  width: 2.2           # Alley width along Y-axis (m) [-1.1 to +1.1]
+  wall_height: 1.2     # Height of boundary walls (m)
+  wall_thickness: 0.1  # Thickness of boundary walls (m)
+  ground_size: [20.0, 20.0] # Ground plane dimensions (m)
+  wall_color: [0.78, 0.80, 0.82]   # Neutral architectural wall color
+  ground_color: [0.35, 0.36, 0.38] # Neutral floor slate color
+
+robot:
+  type: "turtlebot4"
+  prim_path: "/World/Robot/TurtleBot4"
+  spawn_pos: [-3.5, 0.0, 0.0]   # Spawn position (x, y, z)
+  spawn_rot: [1.0, 0.0, 0.0, 0.0] # Quaternion (w, x, y, z)
+  goal_pos: [3.5, 0.0, 0.0]     # Target navigation goal (x, y, z)
+  chassis:
+    radius: 0.17                 # TurtleBot 4 circular chassis radius (m)
+    height: 0.12                 # Chassis height (m)
+    mass: 3.5                    # Mass (kg)
+    wheel_radius: 0.036          # Drive wheel radius (m)
+    wheel_base: 0.233            # Distance between left and right wheels (m)
+  limits:
+    max_linear_vel: 0.5          # Max linear forward speed (m/s)
+    max_angular_vel: 1.5         # Max angular yaw rate (rad/s)
+  camera:
+    prim_rel_path: "front_camera"
+    mount_pos: [0.14, 0.0, 0.20] # Front mount offset from base frame (m)
+    mount_rot: [1.0, 0.0, 0.0, 0.0] # Identity in ROS convention (+Z forward, -Y up)
+    convention: "ros"
+    width: 640
+    height: 480
+    fps: 30
+    clipping_range: [0.05, 50.0]
+    data_types:
+      - "rgb"
+      - "distance_to_image_plane"
+
+simulation:
+  physics_dt: 0.016666667        # 60 Hz physics step
+  rendering_dt: 0.033333333      # 30 Hz sensor & render update
+  decimation: 2                  # 2 physics steps per control/observation cycle = 30 Hz
+  gravity: [0.0, 0.0, -9.81]
+  device: "cuda:0"               # or "cpu"
+
+objects:
+  Bucket_1:
+    prim_path: "/World/Objects/Bucket_1"
+    shape: "cylinder"
+    pos: [-1.0, 0.35, 0.20]      # Center z at half-height (0.4/2 = 0.2)
+    rot: [1.0, 0.0, 0.0, 0.0]
+    radius: 0.20
+    height: 0.40
+    semantic_label: "bucket"
+    visual_color: [0.90, 0.55, 0.15]
+    mass: 1.2
+    parent: null
+    children: ["Blue_Glass"]
+
+  Bucket_2:
+    prim_path: "/World/Objects/Bucket_2"
+    shape: "cylinder"
+    pos: [1.2, -0.30, 0.20]
+    rot: [1.0, 0.0, 0.0, 0.0]
+    radius: 0.20
+    height: 0.40
+    semantic_label: "bucket"
+    visual_color: [0.90, 0.55, 0.15]
+    mass: 1.2
+    parent: null
+    children: []
+
+  Blue_Glass:
+    prim_path: "/World/Objects/Blue_Glass"
+    shape: "cylinder"
+    pos: [-1.0, 0.35, 0.46]      # Centered on top of Bucket_1 (0.40 + 0.06 = 0.46)
+    rot: [1.0, 0.0, 0.0, 0.0]
+    radius: 0.05
+    height: 0.12
+    semantic_label: "blue_glass"
+    liquid_color: [0.10, 0.45, 0.95] # Blue inside mesh
+    glass_opacity: 0.35
+    mass: 0.25
+    parent: "Bucket_1"
+    children: []
+
+  Glass_Vase:
+    prim_path: "/World/Objects/Glass_Vase"
+    shape: "cylinder"
+    pos: [-0.8, -0.45, 0.175]    # Center z at half-height (0.35/2 = 0.175)
+    rot: [1.0, 0.0, 0.0, 0.0]
+    radius: 0.12
+    height: 0.35
+    semantic_label: "glass_vase"
+    visual_color: [0.85, 0.95, 1.0]
+    glass_opacity: 0.30
+    mass: 0.4
+    parent: null
+    children: []
+
+  Soft_Couch:
+    prim_path: "/World/Objects/Soft_Couch"
+    shape: "box"
+    pos: [1.0, 0.65, 0.25]      # Along wall at y=0.65
+    rot: [1.0, 0.0, 0.0, 0.0]
+    size: [0.85, 0.50, 0.50]     # length, width, height
+    radius: 0.25                 # effective bounding radius
+    height: 0.50
+    semantic_label: "soft_couch"
+    visual_color: [0.55, 0.42, 0.35] # Soft brown fabric
+    mass: 8.0
+    parent: null
+    children: []
+
+spectator_camera:
+  prim_path: "/World/SpectatorCamera"
+  pos: [-2.4, -3.4, 3.2]
+  look_at: [0.0, 0.0, 0.2]
+  width: 640
+  height: 480
+  fps: 30
