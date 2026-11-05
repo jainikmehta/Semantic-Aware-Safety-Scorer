@@ -50,6 +50,10 @@ app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
 # Step 2: Import AlleyEnv and dependencies after AppLauncher initialization
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
 from envs.alley_env import AlleyEnv
 
 
@@ -336,3 +340,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

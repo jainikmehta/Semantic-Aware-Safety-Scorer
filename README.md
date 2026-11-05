@@ -91,3 +91,4 @@ The test script creates `recordings/alley_env_test.mp4` featuring:
 - **Right Panel (Top)**: Robot front RGB camera stream ($640 \times 480$).
 - **Right Panel (Bottom)**: Robot front Depth stream (`distance_to_image_plane`) colorized with Turbo colormap.
 - **Overlays**: Real-time HUD displaying robot odometry $[x, y, \theta, v, \omega]$ and tracked semantic objects.
+

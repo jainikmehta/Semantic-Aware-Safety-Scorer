@@ -716,3 +716,4 @@ class AlleyEnv:
         print("[AlleyEnv] Closing environment.")
         if hasattr(self, "sim") and self.sim is not None:
             self.sim.stop()
+
