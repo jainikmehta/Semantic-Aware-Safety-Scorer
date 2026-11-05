@@ -43,7 +43,11 @@ parser.add_argument(
     help="Path to environment configuration YAML file",
 )
 AppLauncher.add_app_launcher_args(parser)
+# Automatically enable camera rendering extensions for offscreen RGB-D rendering & video recording
+if "--enable_cameras" not in sys.argv:
+    sys.argv.append("--enable_cameras")
 args_cli = parser.parse_args()
+args_cli.enable_cameras = True
 
 # Start Isaac Sim application
 app_launcher = AppLauncher(args_cli)

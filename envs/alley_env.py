@@ -20,20 +20,24 @@ from typing import Dict, Any, Tuple, Optional, List
 
 import numpy as np
 import torch
+import carb
 
 # Isaac Lab and Omniverse imports
 import isaaclab.sim as sim_utils
 from isaaclab.sim import SimulationContext, SimulationCfg
 from isaaclab.sensors.camera import Camera, CameraCfg
-from isaaclab.utils.math import quat_from_euler_xyz, matrix_from_quat, quat_inv
+from isaaclab.utils.math import quat_from_euler_xyz, matrix_from_quat
 
 import isaacsim.core.utils.prims as prim_utils
 import isaacsim.core.utils.stage as stage_utils
-from pxr import Gf, UsdGeom, UsdPhysics, PhysxSchema, Sdf, Usd, Vt
+from isaacsim.core.utils.xforms import reset_and_set_xform_ops, get_world_pose
+from pxr import Gf, UsdGeom, UsdPhysics, PhysxSchema, Sdf, Usd
 
 
 def _add_semantics(prim: Usd.Prim, label: str, sem_type: str = "class") -> None:
     """Apply semantic label to a USD prim using the available Semantics API."""
+    if not prim or not prim.IsValid():
+        return
     try:
         from isaacsim.core.utils.semantics import add_update_semantics
         add_update_semantics(prim, semantic_label=label, type_label=sem_type)
@@ -77,11 +81,9 @@ def _look_at_quat(eye: np.ndarray, target: np.ndarray, up: np.ndarray = np.array
     # True up axis
     u = np.cross(r, f)
 
-    # Rotation matrix where X = forward, Y = left, Z = up
-    # Note: ROS / World convention camera frame
+    # Rotation matrix where X = forward, Y = -right, Z = up (ROS / World convention)
     R = np.column_stack([f, -r, u])
 
-    # Convert 3x3 rotation matrix to quaternion (w, x, y, z)
     trace = np.trace(R)
     if trace > 0.0:
         s = 0.5 / math.sqrt(trace + 1.0)
@@ -122,18 +124,15 @@ class AlleyEnv:
         headless: bool = True,
         enable_spectator_cam: bool = True,
     ):
-        """Initialize the Alley Environment.
-
-        Args:
-            cfg_path: Path to env_config.yaml. If None, default path is used.
-            sim_context: Existing SimulationContext instance or None to construct one.
-            device: Compute device ('cuda:0' or 'cpu').
-            headless: Whether running without GUI window.
-            enable_spectator_cam: Whether to spawn a spectator camera for overview recording.
-        """
+        """Initialize the Alley Environment."""
         self.device = device
         self.headless = headless
         self.enable_spectator_cam = enable_spectator_cam
+
+        # Enable cameras in carb settings to prevent any missing flag assertion
+        carb_settings = carb.settings.get_settings()
+        carb_settings.set_bool("/isaaclab/cameras_enabled", True)
+        carb_settings.set_bool("/isaaclab/render/rtx_sensors", True)
 
         # Load environment configuration
         if cfg_path is None:
@@ -197,8 +196,8 @@ class AlleyEnv:
     def _setup_simulation_context(self) -> SimulationContext:
         """Create and configure the SimulationContext singleton."""
         sim_cfg = SimulationCfg(
-            physics_dt=self.physics_dt,
-            rendering_dt=self.rendering_dt,
+            dt=self.physics_dt,
+            render_interval=self.decimation,
             device=self.device,
             gravity=tuple(self.cfg["simulation"].get("gravity", [0.0, 0.0, -9.81])),
         )
@@ -207,26 +206,31 @@ class AlleyEnv:
 
     def _build_environment_prims(self) -> None:
         """Spawn flat ground plane, boundary walls, and illumination."""
-        # 1. Ground Plane
-        ground_cfg = sim_utils.GroundPlaneCfg(
-            size=tuple(self.cfg["alley"].get("ground_size", [20.0, 20.0])),
-            color=tuple(self.cfg["alley"].get("ground_color", [0.35, 0.36, 0.38])),
+        # 1. Ground Plane (procedural solid floor slab - self-contained, no network dependency)
+        ground_size = self.cfg["alley"].get("ground_size", [20.0, 20.0])
+        ground_color = tuple(self.cfg["alley"].get("ground_color", [0.35, 0.36, 0.38]))
+        ground_mat = sim_utils.PreviewSurfaceCfg(diffuse_color=ground_color, roughness=0.7)
+
+        ground_cfg = sim_utils.CuboidCfg(
+            size=(float(ground_size[0]), float(ground_size[1]), 0.1),
+            visual_material=ground_mat,
+            collision_props=sim_utils.CollisionPropertiesCfg(),
         )
-        ground_cfg.func("/World/ground_plane", ground_cfg)
+        sim_utils.spawn_cuboid("/World/ground_plane", ground_cfg, translation=(0.0, 0.0, -0.05))
 
         # 2. Lighting (Dome light + Distant key light)
         dome_light_cfg = sim_utils.DomeLightCfg(
             intensity=1500.0,
             color=(0.95, 0.95, 1.0),
         )
-        dome_light_cfg.func("/World/DomeLight", dome_light_cfg)
+        sim_utils.spawn_light("/World/DomeLight", dome_light_cfg)
 
         distant_light_cfg = sim_utils.DistantLightCfg(
             intensity=2500.0,
             color=(1.0, 0.98, 0.95),
             angle=0.53,
         )
-        distant_light_cfg.func("/World/KeyLight", distant_light_cfg, orientation=(0.85, -0.35, 0.35, 0.15))
+        sim_utils.spawn_light("/World/KeyLight", distant_light_cfg, orientation=(0.85, -0.35, 0.35, 0.15))
 
         # 3. Alley Boundary Walls (8.0m long x 2.2m wide)
         length = float(self.cfg["alley"]["length"])
@@ -234,42 +238,57 @@ class AlleyEnv:
         wall_h = float(self.cfg["alley"]["wall_height"])
         wall_th = float(self.cfg["alley"]["wall_thickness"])
         wall_color = tuple(self.cfg["alley"]["wall_color"])
-
         wall_mat_cfg = sim_utils.PreviewSurfaceCfg(diffuse_color=wall_color, roughness=0.6)
 
-        # Left side wall (Y = +width/2 + wall_th/2)
-        sim_utils.CuboidCfg(
+        # Left side wall
+        wall_l_cfg = sim_utils.CuboidCfg(
             size=(length, wall_th, wall_h),
             visual_material=wall_mat_cfg,
             collision_props=sim_utils.CollisionPropertiesCfg(),
-        ).func("/World/Alley/Wall_Left", sim_utils.CuboidCfg(size=(length, wall_th, wall_h)),
-               translation=(0.0, width / 2.0 + wall_th / 2.0, wall_h / 2.0))
+        )
+        sim_utils.spawn_cuboid(
+            "/World/Alley/Wall_Left",
+            wall_l_cfg,
+            translation=(0.0, width / 2.0 + wall_th / 2.0, wall_h / 2.0),
+        )
 
-        # Right side wall (Y = -width/2 - wall_th/2)
-        sim_utils.CuboidCfg(
+        # Right side wall
+        wall_r_cfg = sim_utils.CuboidCfg(
             size=(length, wall_th, wall_h),
             visual_material=wall_mat_cfg,
             collision_props=sim_utils.CollisionPropertiesCfg(),
-        ).func("/World/Alley/Wall_Right", sim_utils.CuboidCfg(size=(length, wall_th, wall_h)),
-               translation=(0.0, -width / 2.0 - wall_th / 2.0, wall_h / 2.0))
+        )
+        sim_utils.spawn_cuboid(
+            "/World/Alley/Wall_Right",
+            wall_r_cfg,
+            translation=(0.0, -width / 2.0 - wall_th / 2.0, wall_h / 2.0),
+        )
 
-        # Back wall (X = -length/2 - wall_th/2)
-        sim_utils.CuboidCfg(
+        # Back wall
+        wall_b_cfg = sim_utils.CuboidCfg(
             size=(wall_th, width + 2 * wall_th, wall_h),
             visual_material=wall_mat_cfg,
             collision_props=sim_utils.CollisionPropertiesCfg(),
-        ).func("/World/Alley/Wall_Back", sim_utils.CuboidCfg(size=(wall_th, width + 2 * wall_th, wall_h)),
-               translation=(-length / 2.0 - wall_th / 2.0, 0.0, wall_h / 2.0))
+        )
+        sim_utils.spawn_cuboid(
+            "/World/Alley/Wall_Back",
+            wall_b_cfg,
+            translation=(-length / 2.0 - wall_th / 2.0, 0.0, wall_h / 2.0),
+        )
 
-        # Front wall (X = +length/2 + wall_th/2)
-        sim_utils.CuboidCfg(
+        # Front wall
+        wall_f_cfg = sim_utils.CuboidCfg(
             size=(wall_th, width + 2 * wall_th, wall_h),
             visual_material=wall_mat_cfg,
             collision_props=sim_utils.CollisionPropertiesCfg(),
-        ).func("/World/Alley/Wall_Front", sim_utils.CuboidCfg(size=(wall_th, width + 2 * wall_th, wall_h)),
-               translation=(length / 2.0 + wall_th / 2.0, 0.0, wall_h / 2.0))
+        )
+        sim_utils.spawn_cuboid(
+            "/World/Alley/Wall_Front",
+            wall_f_cfg,
+            translation=(length / 2.0 + wall_th / 2.0, 0.0, wall_h / 2.0),
+        )
 
-        # Semantics on walls and ground
+        # Apply semantics
         _add_semantics(self.stage.GetPrimAtPath("/World/Alley/Wall_Left"), "wall")
         _add_semantics(self.stage.GetPrimAtPath("/World/Alley/Wall_Right"), "wall")
         _add_semantics(self.stage.GetPrimAtPath("/World/Alley/Wall_Back"), "wall")
@@ -287,7 +306,6 @@ class AlleyEnv:
         w_radius = self.wheel_radius
         w_base = self.wheel_base
 
-        # 1. Robot Base Root (Rigid body at spawn position)
         base_center_z = r_height / 2.0 + w_radius
         root_translation = (spawn_pos[0], spawn_pos[1], base_center_z)
 
@@ -296,7 +314,7 @@ class AlleyEnv:
         wheel_mat = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.08, 0.08, 0.08), roughness=0.8)
 
         # Base chassis cylinder
-        sim_utils.CylinderCfg(
+        chassis_cfg = sim_utils.CylinderCfg(
             radius=r_radius,
             height=r_height,
             axis="Z",
@@ -304,40 +322,40 @@ class AlleyEnv:
             collision_props=sim_utils.CollisionPropertiesCfg(),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(rigid_body_enabled=True, kinematic_enabled=True),
             mass_props=sim_utils.MassPropertiesCfg(mass=float(self.cfg["robot"]["chassis"]["mass"])),
-        ).func(self.robot_prim_path, sim_utils.CylinderCfg(radius=r_radius, height=r_height),
-               translation=root_translation, orientation=spawn_rot)
+        )
+        sim_utils.spawn_cylinder(self.robot_prim_path, chassis_cfg, translation=root_translation, orientation=spawn_rot)
 
-        # Upper payload / sensor shelf (characteristic TurtleBot 4 green shell)
-        sim_utils.CuboidCfg(
+        # Upper payload / sensor shelf
+        shelf_cfg = sim_utils.CuboidCfg(
             size=(0.20, 0.20, 0.04),
             visual_material=green_accent_mat,
-        ).func(f"{self.robot_prim_path}/shell", sim_utils.CuboidCfg(size=(0.20, 0.20, 0.04)),
-               translation=(0.0, 0.0, r_height / 2.0 + 0.02))
+        )
+        sim_utils.spawn_cuboid(f"{self.robot_prim_path}/shell", shelf_cfg, translation=(0.0, 0.0, r_height / 2.0 + 0.02))
 
         # Sensor mast / camera bracket
-        sim_utils.CuboidCfg(
+        mast_cfg = sim_utils.CuboidCfg(
             size=(0.03, 0.06, 0.12),
             visual_material=chassis_mat,
-        ).func(f"{self.robot_prim_path}/mast", sim_utils.CuboidCfg(size=(0.03, 0.06, 0.12)),
-               translation=(0.12, 0.0, r_height / 2.0 + 0.07))
+        )
+        sim_utils.spawn_cuboid(f"{self.robot_prim_path}/mast", mast_cfg, translation=(0.12, 0.0, r_height / 2.0 + 0.07))
 
-        # Left wheel mesh
-        sim_utils.CylinderCfg(
+        # Left wheel
+        wl_cfg = sim_utils.CylinderCfg(
             radius=w_radius,
             height=0.02,
             axis="Y",
             visual_material=wheel_mat,
-        ).func(f"{self.robot_prim_path}/wheel_left", sim_utils.CylinderCfg(radius=w_radius, height=0.02, axis="Y"),
-               translation=(0.0, w_base / 2.0, -r_height / 2.0 + w_radius / 2.0))
+        )
+        sim_utils.spawn_cylinder(f"{self.robot_prim_path}/wheel_left", wl_cfg, translation=(0.0, w_base / 2.0, -r_height / 2.0 + w_radius / 2.0))
 
-        # Right wheel mesh
-        sim_utils.CylinderCfg(
+        # Right wheel
+        wr_cfg = sim_utils.CylinderCfg(
             radius=w_radius,
             height=0.02,
             axis="Y",
             visual_material=wheel_mat,
-        ).func(f"{self.robot_prim_path}/wheel_right", sim_utils.CylinderCfg(radius=w_radius, height=0.02, axis="Y"),
-               translation=(0.0, -w_base / 2.0, -r_height / 2.0 + w_radius / 2.0))
+        )
+        sim_utils.spawn_cylinder(f"{self.robot_prim_path}/wheel_right", wr_cfg, translation=(0.0, -w_base / 2.0, -r_height / 2.0 + w_radius / 2.0))
 
         # Tag robot semantics
         _add_semantics(self.stage.GetPrimAtPath(self.robot_prim_path), "robot")
@@ -346,7 +364,6 @@ class AlleyEnv:
         """Populate alley with Bucket_1, Bucket_2, Blue_Glass, Glass_Vase, and Soft_Couch."""
         objs_cfg = self.cfg["objects"]
 
-        # Materials
         bucket_mat = sim_utils.PreviewSurfaceCfg(
             diffuse_color=tuple(objs_cfg["Bucket_1"]["visual_color"]),
             roughness=0.45,
@@ -373,9 +390,9 @@ class AlleyEnv:
             roughness=0.85,
         )
 
-        # 1. Bucket_1: circular cylinder/bucket asset (radius ~0.2m, height ~0.4m) at (-1.0, 0.35, 0.0)
+        # 1. Bucket_1
         b1_cfg = objs_cfg["Bucket_1"]
-        sim_utils.CylinderCfg(
+        b1_cylinder_cfg = sim_utils.CylinderCfg(
             radius=float(b1_cfg["radius"]),
             height=float(b1_cfg["height"]),
             axis="Z",
@@ -383,13 +400,18 @@ class AlleyEnv:
             collision_props=sim_utils.CollisionPropertiesCfg(),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(rigid_body_enabled=True),
             mass_props=sim_utils.MassPropertiesCfg(mass=float(b1_cfg["mass"])),
-        ).func(b1_cfg["prim_path"], sim_utils.CylinderCfg(radius=float(b1_cfg["radius"]), height=float(b1_cfg["height"])),
-               translation=tuple(b1_cfg["pos"]), orientation=tuple(b1_cfg["rot"]))
+        )
+        sim_utils.spawn_cylinder(
+            b1_cfg["prim_path"],
+            b1_cylinder_cfg,
+            translation=tuple(b1_cfg["pos"]),
+            orientation=tuple(b1_cfg["rot"]),
+        )
         _add_semantics(self.stage.GetPrimAtPath(b1_cfg["prim_path"]), b1_cfg["semantic_label"])
 
-        # 2. Bucket_2: identical bucket at (1.2, -0.30, 0.0)
+        # 2. Bucket_2
         b2_cfg = objs_cfg["Bucket_2"]
-        sim_utils.CylinderCfg(
+        b2_cylinder_cfg = sim_utils.CylinderCfg(
             radius=float(b2_cfg["radius"]),
             height=float(b2_cfg["height"]),
             axis="Z",
@@ -397,15 +419,20 @@ class AlleyEnv:
             collision_props=sim_utils.CollisionPropertiesCfg(),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(rigid_body_enabled=True),
             mass_props=sim_utils.MassPropertiesCfg(mass=float(b2_cfg["mass"])),
-        ).func(b2_cfg["prim_path"], sim_utils.CylinderCfg(radius=float(b2_cfg["radius"]), height=float(b2_cfg["height"])),
-               translation=tuple(b2_cfg["pos"]), orientation=tuple(b2_cfg["rot"]))
+        )
+        sim_utils.spawn_cylinder(
+            b2_cfg["prim_path"],
+            b2_cylinder_cfg,
+            translation=tuple(b2_cfg["pos"]),
+            orientation=tuple(b2_cfg["rot"]),
+        )
         _add_semantics(self.stage.GetPrimAtPath(b2_cfg["prim_path"]), b2_cfg["semantic_label"])
 
-        # 3. Blue_Glass: transparent cup filled with blue cylinder mesh, centered on top of Bucket_1
+        # 3. Blue_Glass (transparent cup filled with blue cylinder mesh, centered on top surface of Bucket_1)
         bg_cfg = objs_cfg["Blue_Glass"]
         bg_radius = float(bg_cfg["radius"])
         bg_height = float(bg_cfg["height"])
-        sim_utils.CylinderCfg(
+        bg_cylinder_cfg = sim_utils.CylinderCfg(
             radius=bg_radius,
             height=bg_height,
             axis="Z",
@@ -413,22 +440,31 @@ class AlleyEnv:
             collision_props=sim_utils.CollisionPropertiesCfg(),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(rigid_body_enabled=True),
             mass_props=sim_utils.MassPropertiesCfg(mass=float(bg_cfg["mass"])),
-        ).func(bg_cfg["prim_path"], sim_utils.CylinderCfg(radius=bg_radius, height=bg_height),
-               translation=tuple(bg_cfg["pos"]), orientation=tuple(bg_cfg["rot"]))
+        )
+        sim_utils.spawn_cylinder(
+            bg_cfg["prim_path"],
+            bg_cylinder_cfg,
+            translation=tuple(bg_cfg["pos"]),
+            orientation=tuple(bg_cfg["rot"]),
+        )
+        _add_semantics(self.stage.GetPrimAtPath(bg_cfg["prim_path"]), bg_cfg["semantic_label"])
 
         # Inner blue liquid cylinder mesh
-        sim_utils.CylinderCfg(
+        blue_inner_cfg = sim_utils.CylinderCfg(
             radius=bg_radius * 0.88,
             height=bg_height * 0.75,
             axis="Z",
             visual_material=blue_liquid_mat,
-        ).func(f"{bg_cfg['prim_path']}/blue_contents", sim_utils.CylinderCfg(radius=bg_radius * 0.88, height=bg_height * 0.75),
-               translation=(0.0, 0.0, -bg_height * 0.10))
-        _add_semantics(self.stage.GetPrimAtPath(bg_cfg["prim_path"]), bg_cfg["semantic_label"])
+        )
+        sim_utils.spawn_cylinder(
+            f"{bg_cfg['prim_path']}/blue_contents",
+            blue_inner_cfg,
+            translation=(0.0, 0.0, -bg_height * 0.10),
+        )
 
-        # 4. Glass_Vase: fragile glass asset at (-0.8, -0.45, 0.0)
+        # 4. Glass_Vase
         gv_cfg = objs_cfg["Glass_Vase"]
-        sim_utils.CylinderCfg(
+        gv_cylinder_cfg = sim_utils.CylinderCfg(
             radius=float(gv_cfg["radius"]),
             height=float(gv_cfg["height"]),
             axis="Z",
@@ -436,29 +472,43 @@ class AlleyEnv:
             collision_props=sim_utils.CollisionPropertiesCfg(),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(rigid_body_enabled=True),
             mass_props=sim_utils.MassPropertiesCfg(mass=float(gv_cfg["mass"])),
-        ).func(gv_cfg["prim_path"], sim_utils.CylinderCfg(radius=float(gv_cfg["radius"]), height=float(gv_cfg["height"])),
-               translation=tuple(gv_cfg["pos"]), orientation=tuple(gv_cfg["rot"]))
+        )
+        sim_utils.spawn_cylinder(
+            gv_cfg["prim_path"],
+            gv_cylinder_cfg,
+            translation=tuple(gv_cfg["pos"]),
+            orientation=tuple(gv_cfg["rot"]),
+        )
         _add_semantics(self.stage.GetPrimAtPath(gv_cfg["prim_path"]), gv_cfg["semantic_label"])
 
-        # 5. Soft_Couch: sofa asset along wall at (1.0, 0.65, 0.0)
+        # 5. Soft_Couch
         sc_cfg = objs_cfg["Soft_Couch"]
         sc_size = tuple(sc_cfg["size"])
-        sim_utils.CuboidCfg(
+        sc_base_cfg = sim_utils.CuboidCfg(
             size=sc_size,
             visual_material=couch_mat,
             collision_props=sim_utils.CollisionPropertiesCfg(),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(rigid_body_enabled=True),
             mass_props=sim_utils.MassPropertiesCfg(mass=float(sc_cfg["mass"])),
-        ).func(sc_cfg["prim_path"], sim_utils.CuboidCfg(size=sc_size),
-               translation=tuple(sc_cfg["pos"]), orientation=tuple(sc_cfg["rot"]))
+        )
+        sim_utils.spawn_cuboid(
+            sc_cfg["prim_path"],
+            sc_base_cfg,
+            translation=tuple(sc_cfg["pos"]),
+            orientation=tuple(sc_cfg["rot"]),
+        )
+        _add_semantics(self.stage.GetPrimAtPath(sc_cfg["prim_path"]), sc_cfg["semantic_label"])
 
         # Couch backrest
-        sim_utils.CuboidCfg(
+        sc_back_cfg = sim_utils.CuboidCfg(
             size=(sc_size[0], sc_size[1] * 0.35, sc_size[2] * 0.7),
             visual_material=couch_mat,
-        ).func(f"{sc_cfg['prim_path']}/backrest", sim_utils.CuboidCfg(size=(sc_size[0], sc_size[1] * 0.35, sc_size[2] * 0.7)),
-               translation=(0.0, sc_size[1] * 0.35, sc_size[2] * 0.5))
-        _add_semantics(self.stage.GetPrimAtPath(sc_cfg["prim_path"]), sc_cfg["semantic_label"])
+        )
+        sim_utils.spawn_cuboid(
+            f"{sc_cfg['prim_path']}/backrest",
+            sc_back_cfg,
+            translation=(0.0, sc_size[1] * 0.35, sc_size[2] * 0.5),
+        )
 
     def _setup_cameras(self) -> None:
         """Initialize front RGB-D camera on robot and external spectator camera."""
@@ -521,16 +571,22 @@ class AlleyEnv:
         for obj_name, obj_data in self.cfg["objects"].items():
             prim = self.stage.GetPrimAtPath(obj_data["prim_path"])
             if prim.IsValid():
-                xformable = UsdGeom.Xformable(prim)
-                world_transform = xformable.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
-                translation = world_transform.ExtractTranslation()
-                rotation_quat = world_transform.ExtractRotationQuat()
-
-                pos = [float(translation[0]), float(translation[1]), float(translation[2])]
-                rot = [float(rotation_quat.GetReal()),
-                       float(rotation_quat.GetImaginary()[0]),
-                       float(rotation_quat.GetImaginary()[1]),
-                       float(rotation_quat.GetImaginary()[2])]
+                try:
+                    pos_np, quat_np = get_world_pose(obj_data["prim_path"])
+                    pos = [float(p) for p in pos_np]
+                    rot = [float(q) for q in quat_np]
+                except Exception:
+                    xformable = UsdGeom.Xformable(prim)
+                    world_transform = xformable.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+                    translation = world_transform.ExtractTranslation()
+                    rotation_quat = world_transform.ExtractRotationQuat()
+                    pos = [float(translation[0]), float(translation[1]), float(translation[2])]
+                    rot = [
+                        float(rotation_quat.GetReal()),
+                        float(rotation_quat.GetImaginary()[0]),
+                        float(rotation_quat.GetImaginary()[1]),
+                        float(rotation_quat.GetImaginary()[2]),
+                    ]
             else:
                 pos = list(obj_data["pos"])
                 rot = list(obj_data["rot"])
@@ -559,52 +615,29 @@ class AlleyEnv:
 
     def _update_robot_physics(self, v_cmd: float, w_cmd: float) -> None:
         """Integrate differential-drive kinematics and apply to robot prim."""
-        # Clamp velocity commands within limits
         self.robot_v = float(np.clip(v_cmd, -self.max_lin_vel, self.max_lin_vel))
         self.robot_w = float(np.clip(w_cmd, -self.max_ang_vel, self.max_ang_vel))
 
         dt = self.step_dt
-        # Kinematic differential-drive integration
         self.robot_theta = float((self.robot_theta + self.robot_w * dt + math.pi) % (2.0 * math.pi) - math.pi)
         self.robot_x += float(self.robot_v * math.cos(self.robot_theta) * dt)
         self.robot_y += float(self.robot_v * math.sin(self.robot_theta) * dt)
 
-        # Update USD prim transform
         robot_prim = self.stage.GetPrimAtPath(self.robot_prim_path)
         if robot_prim.IsValid():
-            xformable = UsdGeom.Xformable(robot_prim)
             r_height = float(self.cfg["robot"]["chassis"]["height"])
             base_z = r_height / 2.0 + self.wheel_radius
-
-            # Compute rotation around Z axis
             qw = math.cos(self.robot_theta / 2.0)
             qz = math.sin(self.robot_theta / 2.0)
-            quat_gf = Gf.Quatd(qw, Gf.Vec3d(0.0, 0.0, qz))
 
-            # Set translate and orient
-            xformable.ClearXformOpOrder()
-            translate_op = xformable.AddTranslateOp()
-            translate_op.Set(Gf.Vec3d(self.robot_x, self.robot_y, base_z))
-            orient_op = xformable.AddOrientOp()
-            orient_op.Set(quat_gf)
+            reset_and_set_xform_ops(
+                robot_prim,
+                translation=Gf.Vec3d(self.robot_x, self.robot_y, base_z),
+                orientation=Gf.Quatd(qw, Gf.Vec3d(0.0, 0.0, qz)),
+            )
 
     def step(self, v_cmd: float, w_cmd: float) -> Dict[str, Any]:
-        """Execute one environment step with differential-drive commands.
-
-        Args:
-            v_cmd: Linear forward velocity command (m/s).
-            w_cmd: Angular yaw rate command (rad/s).
-
-        Returns:
-            Dictionary containing:
-                - 'rgb': torch.Tensor [H, W, 3] or [H, W, 4] RGB image.
-                - 'depth': torch.Tensor [H, W] or [H, W, 1] distance_to_image_plane depth.
-                - 'camera_intrinsics': np.ndarray [3, 3] camera intrinsic matrix.
-                - 'camera_extrinsics': np.ndarray [4, 4] camera-to-world transform matrix.
-                - 'robot_state': np.ndarray [5] odometry state [x, y, theta, v, w].
-                - 'ground_truth_objects': Dict of all semantic objects with 3D poses,
-                  radii, and parent-child relations.
-        """
+        """Execute one environment step with differential-drive commands."""
         # 1. Update robot pose and velocity
         self._update_robot_physics(v_cmd, w_cmd)
 
@@ -625,7 +658,6 @@ class AlleyEnv:
         rgb_raw = cam_data.output["rgb"]
         depth_raw = cam_data.output["distance_to_image_plane"]
 
-        # Ensure single environment batch dimension is removed for clean consumer interface
         if isinstance(rgb_raw, torch.Tensor) and rgb_raw.ndim == 4:
             rgb_tensor = rgb_raw[0]
         else:
@@ -691,7 +723,6 @@ class AlleyEnv:
             img = rgb_raw[0].cpu().numpy()
         else:
             img = np.array(rgb_raw[0])
-        # Return uint8 HxWx3
         if img.shape[-1] == 4:
             img = img[..., :3]
         return img.astype(np.uint8)
@@ -716,4 +747,3 @@ class AlleyEnv:
         print("[AlleyEnv] Closing environment.")
         if hasattr(self, "sim") and self.sim is not None:
             self.sim.stop()
-
