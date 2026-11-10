@@ -1,129 +1,174 @@
-# Semantic Aware Safety Scorer - Environment Configuration
-# High-Fidelity Narrow Alley Environment with TurtleBot 4 and Semantic Objects
-
-alley:
-  length: 8.0          # Alley length along X-axis (m) [-4.0 to +4.0]
-  width: 2.2           # Alley width along Y-axis (m) [-1.1 to +1.1]
-  wall_height: 1.2     # Height of boundary walls (m)
-  wall_thickness: 0.1  # Thickness of boundary walls (m)
-  ground_size: [12.0, 6.0] # Ground plane dimensions (m)
-  wall_color: [0.86, 0.88, 0.90]   # Architectural plaster finish
-  ground_color: [0.36, 0.38, 0.40] # Tiled slate floor tone
-  skirting_color: [0.16, 0.16, 0.18] # Dark baseboard trim
-
-robot:
-  type: "turtlebot4"
-  prim_path: "/World/Robot/TurtleBot4"
-  spawn_pos: [-3.5, 0.0, 0.0]   # Spawn position (x, y, z)
-  spawn_rot: [1.0, 0.0, 0.0, 0.0] # Quaternion (w, x, y, z)
-  goal_pos: [3.5, 0.0, 0.0]     # Target navigation goal (x, y, z)
-  chassis:
-    radius: 0.17                 # TurtleBot 4 circular chassis radius (m)
-    height: 0.08                 # Chassis height (m)
-    mass: 3.5                    # Mass (kg)
-    wheel_radius: 0.036          # Drive wheel radius (m)
-    wheel_base: 0.233            # Distance between left and right wheels (m)
-  limits:
-    max_linear_vel: 0.5          # Max linear forward speed (m/s)
-    max_angular_vel: 1.5         # Max angular yaw rate (rad/s)
-  camera:
-    prim_rel_path: "front_camera"
-    mount_pos: [0.16, 0.0, 0.22] # OAK-D-Pro position on front sensor tower (m)
-    mount_rot: [1.0, 0.0, 0.0, 0.0] # ROS convention (+Z forward, -Y up)
-    convention: "ros"
-    width: 640
-    height: 480
-    fps: 30
-    clipping_range: [0.05, 50.0]
-    data_types:
-      - "rgb"
-      - "distance_to_image_plane"
+# Semantic Aware Safety Scorer - environment configuration.
+# Paths starting with "NVIDIA/" are relative to Isaac Sim's asset server (they need network access or a local cache).
 
 simulation:
-  physics_dt: 0.016666667        # 60 Hz physics step
-  rendering_dt: 0.033333333      # 30 Hz sensor & render update
-  decimation: 2                  # 2 physics steps per control/observation cycle = 30 Hz
+  physics_hz: 120              # PhysX rate
+  sensor_hz: 30                # env.step() rate: control, RGB-D and odometry
   gravity: [0.0, 0.0, -9.81]
-  device: "cuda:0"
-  physx:
-    enable_external_forces_every_iteration: true
+  settle_time_s: 0.5           # physics run in reset() so that the objects come to rest before the first frame
+
+rendering:
+  mode: "quality"              # Isaac Lab rendering preset
+  antialiasing: "DLAA"         # native resolution; the DLSS default upscaled the 640x480 camera from 371x278
+  render_passes_per_step: 2    # annotators return the previous render, so one extra pass keeps images in sync with state
+  warmup_frames: 40            # renders after the stage has loaded, so that textures are in before the first frame
+  load_timeout_s: 240          # first run downloads materials from the asset server
+
+lighting:
+  dome_intensity: 600.0
+  dome_hdri: "NVIDIA/Assets/Skies/Cloudy/abandoned_parking_4k.hdr"
+  sun_intensity: 450.0
+  sun_angle_deg: 2.0           # angular size of the sun: larger = softer shadows
+  sun_rotation: [0.8660, 0.2500, 0.4330, 0.0]   # (w, x, y, z)
+
+alley:
+  length: 8.0                  # along X, [-4.0, +4.0]
+  width: 2.2                   # along Y, [-1.1, +1.1]
+  wall_height: 1.2
+  wall_thickness: 0.1
+  alcove: {x_min: -0.70, x_max: 0.15, depth: 0.50}   # recess in the +Y wall where the Person starts
+  ground_size: [40.0, 40.0]
+  wall_material: {mdl: "NVIDIA/Materials/Base/Masonry/Brick_Wall_Brown.mdl", tile_m: 1.5}
+  cap_material: {mdl: "NVIDIA/Materials/Base/Masonry/Concrete_Smooth.mdl", tile_m: 1.5}
+  floor_material: {mdl: "NVIDIA/Materials/Base/Masonry/Concrete_Rough.mdl", tile_m: 2.5}
+
+robot:
+  urdf: "assets/turtlebot4/turtlebot4_standard.urdf"   # converted to assets/turtlebot4/usd/ at first launch
+  prim_path: "/World/Robot/TurtleBot4"
+  spawn_pos: [-3.5, 0.0, 0.0]     # base_footprint: the wheels touch the floor at z = 0
+  spawn_rot: [1.0, 0.0, 0.0, 0.0] # (w, x, y, z)
+  goal_pos: [3.5, 0.0, 0.0]
+  footprint_radius: 0.172
+  wheel_radius: 0.03575           # TurtleBot 4 URDF
+  wheel_base: 0.233               # TurtleBot 4 URDF
+  limits:                         # iRobot Create 3 specification
+    max_linear_vel: 0.46          # m/s
+    max_angular_vel: 1.90         # rad/s
+    max_linear_accel: 0.9         # m/s^2
+    max_angular_accel: 4.0        # rad/s^2
+  drive:
+    damping: 15.0                 # N m s/rad, wheel velocity drive
+    effort_limit: 2.0             # N m per wheel
+    velocity_limit: 20.0          # rad/s
+    wheel_friction: 1.0
+    caster_friction: 0.02         # the real caster is a rolling ball; the model has a fixed sphere
+  camera:
+    prim_rel_path: "base_link/front_camera"
+    # OAK-D Pro RGB sensor from the URDF: shell_link + oakd_camera_bracket + oakd_link, facing forward.
+    mount_pos: [-0.0596, 0.0, 0.24353]
+    mount_rot: [0.5, -0.5, 0.5, -0.5]  # base_link -> ROS optical frame (+Z forward, +X right, +Y down), (w, x, y, z)
+    hfov_deg: 69.0                # OAK-D Pro colour camera
+    width: 640
+    height: 480
+    clipping_range: [0.05, 50.0]
+    data_types: ["rgb", "distance_to_image_plane"]
+
+# When two materials with different combine modes touch, PhysX uses the higher-priority mode: average < min < multiply < max.
+# That is what makes these pairs work: bucket base on floor = max -> 1.4 / 1.1; glass on lid = min -> the lid's values;
+# glass on floor = average of the glass and the floor. Never give the lid "max": it would override the low lid friction.
+physics_materials:
+  bucket_body: {static: 1.4, dynamic: 1.1, combine: "max"}
+  bucket_lid: {static: 0.06, dynamic: 0.02, combine: "min"}   # low on purpose: see the README
+  glass: {static: 0.5, dynamic: 0.4, combine: "average"}
 
 objects:
+  # pos: x, y of the object's centre and z of the surface it stands on. A child (parent != null) stands on top of its
+  # parent, so its z comes from the parent's height. Ground truth reports the centre of the object.
   Bucket_1:
     prim_path: "/World/Objects/Bucket_1"
-    shape: "cylinder"
-    pos: [-1.0, 0.35, 0.20]      # Center z at half-height (0.4/2 = 0.2)
-    rot: [1.0, 0.0, 0.0, 0.0]
+    kind: "bucket"
+    pos: [-1.0, 0.35, 0.0]
     radius: 0.20
     height: 0.40
-    semantic_label: "bucket"
-    visual_color: [0.92, 0.48, 0.10] # Industrial safety orange
-    rim_color: [0.20, 0.20, 0.22]    # Dark reinforced rim
     mass: 1.2
+    semantic_label: "bucket"
+    color: [0.86, 0.33, 0.05]
+    lid_color: [0.10, 0.10, 0.11]
     parent: null
-    children: ["Blue_Glass"]
 
   Bucket_2:
     prim_path: "/World/Objects/Bucket_2"
-    shape: "cylinder"
-    pos: [1.2, -0.30, 0.20]
-    rot: [1.0, 0.0, 0.0, 0.0]
+    kind: "bucket"
+    pos: [1.2, -0.42, 0.0]
     radius: 0.20
     height: 0.40
-    semantic_label: "bucket"
-    visual_color: [0.92, 0.48, 0.10]
-    rim_color: [0.20, 0.20, 0.22]
     mass: 1.2
+    semantic_label: "bucket"
+    color: [0.86, 0.33, 0.05]
+    lid_color: [0.10, 0.10, 0.11]
     parent: null
-    children: []
 
   Blue_Glass:
     prim_path: "/World/Objects/Blue_Glass"
-    shape: "cylinder"
-    pos: [-1.0, 0.35, 0.46]      # Centered on top of Bucket_1 (0.40 + 0.06 = 0.46)
-    rot: [1.0, 0.0, 0.0, 0.0]
+    kind: "glass_cup"
+    pos: [-1.0, 0.35, 0.0]
     radius: 0.05
     height: 0.12
-    semantic_label: "blue_glass"
-    liquid_color: [0.10, 0.45, 0.95] # Cobalt blue liquid contents
-    glass_opacity: 0.30
     mass: 0.25
+    semantic_label: "blue_glass"
+    glass_color: [0.86, 0.97, 0.95]   # same material as Glass_Vase; the glass is empty
+    com_z_offset: 0.02                # centre of mass slightly above the geometric centre
     parent: "Bucket_1"
-    children: []
 
   Glass_Vase:
     prim_path: "/World/Objects/Glass_Vase"
-    shape: "cylinder"
-    pos: [-0.8, -0.45, 0.175]    # Center z at half-height (0.35/2 = 0.175)
-    rot: [1.0, 0.0, 0.0, 0.0]
+    kind: "vase"
+    pos: [-0.8, -0.45, 0.0]
     radius: 0.12
     height: 0.35
+    mass: 0.8
     semantic_label: "glass_vase"
-    visual_color: [0.90, 0.98, 0.97] # Refractive glass with subtle cyan tint
-    glass_opacity: 0.22
-    mass: 0.4
+    glass_color: [0.86, 0.97, 0.95]
     parent: null
-    children: []
 
   Soft_Couch:
     prim_path: "/World/Objects/Soft_Couch"
-    shape: "box"
-    pos: [1.0, 0.65, 0.25]      # Along wall at y=0.65
-    rot: [1.0, 0.0, 0.0, 0.0]
-    size: [0.90, 0.55, 0.50]     # length, width, height
-    radius: 0.25                 # effective bounding radius
-    height: 0.50
+    kind: "couch"
+    pos: [1.0, 0.65, 0.0]
+    usd: "NVIDIA/Assets/ArchVis/Residential/Furniture/Sofas/Arnold.usd"
+    depth: 0.70                  # the sofa is scaled uniformly to this depth (Y); its length and height follow
+    yaw_deg: 0.0
+    mass: 30.0
     semantic_label: "soft_couch"
-    visual_color: [0.42, 0.38, 0.34] # Rich warm taupe/charcoal upholstery
-    mass: 8.0
     parent: null
-    children: []
+
+human_actor:
+  enabled: true
+  prim_path: "/World/Objects/Person"
+  semantic_label: "person"
+  character_usd: "Isaac/People/Characters/male_adult_construction_05_new/male_adult_construction_05_new.usd"
+  walk_clip: "Isaac/People/Animations/stand_walk_loop_in_place.skelanim.usd"
+  walk_clip_root_motion: "Isaac/People/Animations/stand_walk_loop.skelanim.usd"   # gives the stride length of the clip
+  idle_clip: "Isaac/People/Animations/stand_idle_loop.skelanim.usd"
+  biped_skeleton: "Isaac/People/Characters/Biped_Setup.usd"
+  stride_scale: 0.70          # 1 = the clip's full stride; shorter steps look natural at this slow walking speed
+  spawn_pos: [-0.2, 0.9, 0.0]
+  radius: 0.25                # collider
+  height: 1.75                # collider
+  mass: 75.0
+  speed: 0.55                 # m/s
+  acceleration: 0.8           # m/s^2
+  turn_rate: 2.2              # rad/s
+  trigger_robot_x: -2.9       # APPROACH_B1 starts when the robot crosses this x
+  placement_mode: "edge"      # "center": eccentricity 0; "edge": edge_eccentricity towards the robot's path
+  edge_eccentricity: 0.85
+  carry_height: 0.95          # m, centre of the glass while it is carried
+  carry_offset: [0.20, -0.14] # m, (forward, left) of the Person's axis: in the right hand
+  reach_time: 0.9             # s, hand from the side of the body to the glass
+  lift_time: 0.9              # s, glass from the bucket to the carry pose (and back down when placing)
+  retract_time: 0.7           # s, hand back to the side of the body after placing
+  min_path_clearance: 0.002   # m between the collider and any object along the routes; checked at startup
+  # Routes are polylines through (x, y); the corners get rounded. Every route is checked against the objects at startup.
+  approach_path: [[-0.20, 0.90], [-0.62, 0.62]]
+  carry_path: [[-0.62, 0.62], [0.05, 0.02], [0.75, -0.36]]   # stands at Bucket_2 on the side nearest the glass; bends around the couch
+  # around Bucket_2 on the wall side, on an arc of radius 0.465 m
+  exit_path: [[0.75, -0.36], [0.742, -0.501], [0.779, -0.617], [0.844, -0.719], [1.003, -0.841], [1.200, -0.885], [1.397, -0.841], [1.556, -0.719], [2.40, -0.25], [3.80, 0.80]]
+  exit_yaw_deg: 180.0         # finally faces back down the alley
 
 spectator_camera:
   prim_path: "/World/SpectatorCamera"
-  # Elevated trailing isometric vantage point looking down the entire corridor
-  pos: [-4.6, -1.3, 2.6]
-  look_at: [0.2, 0.0, 0.3]
-  width: 960
-  height: 720
-  fps: 30
+  pos: [-4.6, -1.0, 3.7]
+  look_at: [-0.9, 0.0, 0.35]
+  hfov_deg: 80.0
+  width: 1280
+  height: 960

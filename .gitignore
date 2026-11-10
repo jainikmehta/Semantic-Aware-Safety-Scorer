@@ -23,6 +23,9 @@ recordings/*.mp4
 recordings/*.avi
 recordings/*.png
 
+# Robot USD generated from the URDF at first launch
+assets/turtlebot4/usd/
+
 # IDE
 .vscode/
 .idea/
@@ -34,3 +37,4 @@ outputs/
 checkpoints/
 data/
 
+2026-*-pastedcontent-*.txt
