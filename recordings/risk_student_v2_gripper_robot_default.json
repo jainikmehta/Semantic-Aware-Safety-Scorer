@@ -1,0 +1,73 @@
+{
+ "checkpoint": "/home/mehtaj3/Documents/scripts/Semantic Aware Safety Scorer/checkpoints/student_v2/best",
+ "scenario": "gripper_robot",
+ "scene": "default",
+ "video": "/home/mehtaj3/Documents/scripts/Semantic Aware Safety Scorer/recordings/risk_student_v2_gripper_robot_default.mp4",
+ "sam_ms_median": 69.65,
+ "student_ms_median": 60.555,
+ "by_state": {
+  "armchair": {
+   "frames": 204,
+   "inside_range": 0.9950980392156863,
+   "risk_mean": 0.06391744167251769,
+   "risk_min": 0.005384937860071659,
+   "risk_max": 0.23792988061904907
+  },
+  "bean bag": {
+   "frames": 418,
+   "inside_range": 0.992822966507177,
+   "risk_mean": 0.0694363315594739,
+   "risk_min": 0.0013670255430042744,
+   "risk_max": 0.319121390581131
+  },
+  "bucket": {
+   "frames": 634,
+   "inside_range": 0.9668769716088328,
+   "risk_mean": 0.1838884046330625,
+   "risk_min": 0.06754669547080994,
+   "risk_max": 0.9732407331466675
+  },
+  "bucket + drinking glass": {
+   "frames": 403,
+   "inside_range": 0.794044665012407,
+   "risk_mean": 0.7611481143212496,
+   "risk_min": 0.2133771777153015,
+   "risk_max": 0.9914224743843079
+  },
+  "couch": {
+   "frames": 663,
+   "inside_range": 0.9276018099547512,
+   "risk_mean": 0.10438102077788268,
+   "risk_min": 0.004905405919998884,
+   "risk_max": 0.8418256044387817
+  },
+  "glass vase on the floor": {
+   "frames": 347,
+   "inside_range": 0.1930835734870317,
+   "risk_mean": 0.9745360243560945,
+   "risk_min": 0.9046505093574524,
+   "risk_max": 0.998245358467102
+  },
+  "gripper robot": {
+   "frames": 838,
+   "inside_range": 1.0,
+   "risk_mean": 0.6672738395755786,
+   "risk_min": 0.601593554019928,
+   "risk_max": 0.7634837031364441
+  },
+  "gripper robot + drinking glass": {
+   "frames": 85,
+   "inside_range": 0.7176470588235294,
+   "risk_mean": 0.8195699264021481,
+   "risk_min": 0.665410578250885,
+   "risk_max": 0.9184802770614624
+  },
+  "ottoman": {
+   "frames": 197,
+   "inside_range": 1.0,
+   "risk_mean": 0.004304584467648836,
+   "risk_min": 0.00017952796770259738,
+   "risk_max": 0.1766715943813324
+  }
+ }
+}

@@ -1,0 +1,8 @@
+# Proposal and presentation material (scripts/record_media.py): the configured alley with a larger spectator camera.
+# The spectator's viewpoint is set per shot by the script.
+extends: env_config.yaml
+
+spectator_camera:
+  hfov_deg: 60.0
+  width: 1920
+  height: 1080

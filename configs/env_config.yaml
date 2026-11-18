@@ -1,6 +1,12 @@
 # Semantic Aware Safety Scorer - environment configuration.
 # Paths starting with "NVIDIA/" are relative to Isaac Sim's asset server (they need network access or a local cache).
 
+# Who moves Blue_Glass from Bucket_1 to Bucket_2 while the robot drives down the alley:
+#   "person"         the Person (human_actor below)
+#   "gripper_robot"  a mobile manipulator: Jackal base, UR10e arm, Robotiq 2F-140 gripper (gripper_robot below)
+# The scripts take --scenario to override this.
+scenario: "person"
+
 simulation:
   physics_hz: 120              # PhysX rate
   sensor_hz: 30                # env.step() rate: control, RGB-D and odometry
@@ -132,8 +138,46 @@ objects:
     semantic_label: "soft_couch"
     parent: null
 
-human_actor:
+  # More soft furniture, to see how the obstacle test copes with legs: thick legs, thin legs, none.
+  Soft_Chair:                  # upholstered armchair on short wooden legs
+    prim_path: "/World/Objects/Soft_Chair"
+    kind: "furniture"
+    pos: [-1.90, -0.70, 0.0]
+    usd: "NVIDIA/Assets/ArchVis/Residential/Furniture/Chairs/Meramec_Chair.usd"
+    depth: 0.78
+    yaw_deg: 180.0               # turns the asset so that its backrest is on the collider's backrest side (+y)
+    root_yaw_deg: 180.0          # turns chair and colliders: backrest against the -y wall, seat facing the alley
+    collider: "seat_back"
+    mass: 18.0
+    semantic_label: "soft_chair"
+    parent: null
+
+  Ottoman:                     # padded ottoman on thin legs
+    prim_path: "/World/Objects/Ottoman"
+    kind: "furniture"
+    pos: [-2.05, 0.70, 0.0]      # low enough not to hide the couch and Bucket_1 from the start
+    usd: "NVIDIA/Assets/ArchVis/Residential/Furniture/FurnitureSets/Whitecliff/Whitecliff_Ottoman.usd"
+    depth: 0.55
+    yaw_deg: 0.0
+    collider: "box"
+    mass: 10.0
+    semantic_label: "ottoman"
+    parent: null
+
+  Bean_Bag:                    # procedural, resting on the floor over its whole base
+    prim_path: "/World/Objects/Bean_Bag"
+    kind: "bean_bag"
+    pos: [3.20, -0.66, 0.0]      # far end, beside the goal, clear of every route
+    radius: 0.42
+    height: 0.48
+    mass: 6.0
+    material: {mdl: "NVIDIA/Materials/Base/Textiles/Linen_Blue.mdl"}
+    semantic_label: "bean_bag"
+    parent: null
+
+human_actor:                  # scenario "person"
   enabled: true
+  name: "Person"              # key in the ground truth
   prim_path: "/World/Objects/Person"
   semantic_label: "person"
   character_usd: "Isaac/People/Characters/male_adult_construction_05_new/male_adult_construction_05_new.usd"
@@ -164,6 +208,92 @@ human_actor:
   # around Bucket_2 on the wall side, on an arc of radius 0.465 m
   exit_path: [[0.75, -0.36], [0.742, -0.501], [0.779, -0.617], [0.844, -0.719], [1.003, -0.841], [1.200, -0.885], [1.397, -0.841], [1.556, -0.719], [2.40, -0.25], [3.80, 0.80]]
   exit_yaw_deg: 180.0         # finally faces back down the alley
+
+gripper_robot:                # scenario "gripper_robot": same state machine and placement as the Person
+  enabled: true
+  name: "Gripper_Robot"       # key in the ground truth
+  prim_path: "/World/Objects/Gripper_Robot"   # kinematic box collider that stands for the robot
+  semantic_label: "gripper_robot"
+  base_usd: "Isaac/Robots/Clearpath/Jackal/jackal.usd"
+  arm_usd: "Isaac/Robots/UniversalRobots/ur10e/ur10e.usd"
+  gripper_variant: "Robotiq_2f_140"   # opens 140 mm; the glass is 100 mm wide
+  base_prim_path: "/World/GripperRobot/Base"
+  arm_prim_path: "/World/GripperRobot/Arm"
+  base_height: 0.0653         # Jackal base_link above the floor (wheels on the ground)
+  wheel_radius: 0.098
+  track_width: 0.3756
+  wheel_direction: 1.0        # +1 or -1: sign of the wheel joints for forward motion
+  arm_mount: [-0.08, 0.0, 0.19]       # UR10e base_link in the Jackal's base_link frame: on the top plate, behind the lidar
+  footprint: [0.51, 0.43]     # m, length x width of the collider (the Jackal's chassis)
+  height: 0.30                # m, collider height
+  mass: 60.0
+  spawn_pos: [-0.275, 1.27, 0.0]      # in the alcove; starts facing along approach_path
+  speed: 0.50                 # m/s
+  acceleration: 0.6           # m/s^2
+  turn_rate: 1.6              # rad/s
+  trigger_robot_x: -2.9
+  placement_mode: "edge"
+  edge_eccentricity: 0.85
+  carry_height: 0.75          # m, centre of the glass while it is carried (also the arm's ready pose without the glass)
+  carry_offset: [0.55, 0.0]   # m, (forward, left) of the base's centre
+  grasp_height_offset: 0.025  # m, the fingers close this far above the glass's centre
+  pregrasp_distance: 0.12     # m, the gripper lines up this far from the glass before moving in
+  reach_time: 1.8             # s, ready pose -> pre-grasp -> around the glass
+  grasp_time: 0.5             # s, closing (and later opening) the gripper
+  lift_time: 1.2              # s
+  retract_time: 1.5           # s, back to the ready pose after placing
+  min_path_clearance: 0.01    # m between the footprint and any object along the routes; checked at startup
+  ik_seed: [0.0, -2.0, 2.2, -1.77, -1.57, 0.0]   # picks the elbow-up, wrist-down branch of the arm's IK
+  approach_path: [[-0.275, 1.27], [-0.40, 0.78]]
+  carry_path: [[-0.40, 0.78], [-0.30, 0.10], [0.45, -0.15]]
+  # between the couch and Bucket_2 (0.52 m gap for the 0.43 m wide base), then to the far end beside the goal
+  exit_path: [[0.45, -0.15], [0.75, 0.035], [2.20, 0.035], [2.65, 0.45], [3.25, 0.70]]
+  exit_yaw_deg: 0.0           # the arm points at the end wall, not into the side wall
+  gripper:
+    grasp_opening: 0.098      # m between the pads when closed on the glass
+    # Parallel linkage as multiples of finger_joint (measured in Isaac Sim: closes the loop to 0.03 mm)
+    joint_multipliers: {finger_joint: 1.0, right_outer_knuckle_joint: 1.0, left_outer_finger_joint: 0.0, right_outer_finger_joint: 0.0,
+                        left_inner_finger_joint: -1.0, right_inner_finger_joint: -1.0, left_inner_finger_pad_joint: 1.0,
+                        right_inner_finger_pad_joint: 1.0}
+    # [finger_joint rad, opening between the pads m, pad midpoint along the tool's +z from wrist_3_link m]
+    calibration:
+      - [0.000, 0.1443, 0.1843]
+      - [0.060, 0.1351, 0.1882]
+      - [0.120, 0.1255, 0.1918]
+      - [0.180, 0.1155, 0.1951]
+      - [0.240, 0.1051, 0.1981]
+      - [0.300, 0.0944, 0.2007]
+      - [0.360, 0.0833, 0.2031]
+      - [0.420, 0.0720, 0.2051]
+      - [0.480, 0.0605, 0.2068]
+      - [0.540, 0.0488, 0.2081]
+      - [0.600, 0.0370, 0.2091]
+      - [0.660, 0.0250, 0.2097]
+      - [0.720, 0.0130, 0.2099]
+      - [0.780, 0.0010, 0.2098]
+
+# SAM 3 (Meta's Segment Anything Model 3) segments the obstacles in the robot's RGB image from text prompts. It runs in a
+# worker process (perception/sam3_worker.py) with its own Python, because SAM 3 needs transformers >= 5 and Isaac Lab ships 4.x.
+# The checkpoint is gated: accept the license on huggingface.co/facebook/sam3 and log in once with `hf auth login`, then set
+# model to "facebook/sam3". Or convert Meta's sam3.pt to a local folder (see the README) and point model at it.
+sam3:
+  enabled: true
+  model: "facebook/sam3"      # or a local folder, e.g. "~/models/sam3_hf" (converted from sam3.pt; identical detections)
+  python: "~/miniforge3/envs/risl/bin/python"   # interpreter with torch and transformers >= 5; null = the one running Isaac Lab
+  device: "cuda:0"
+  dtype: "bfloat16"
+  compile: true               # torch.compile + CUDA graphs: ~1.3x faster per frame (49 ms with 9 prompts on an RTX PRO 6000); ~1 min more at start
+  prompts: ["bucket", "drinking glass", "glass vase", "sofa", "armchair", "ottoman", "bean bag", "person", "robot"]   # one forward pass of the image encoder for all
+  score_threshold: 0.40
+  mask_threshold: 0.50
+  dedupe_iou: 0.60            # overlapping masks from different prompts: the higher score wins
+  mode: "sync"                # sync: each frame waits for its masks (videos); async: use the latest result, never block the sim
+  ground:                     # which detections are obstacles, from the depth image and the camera pose
+    # m: an obstacle has a visible part below this, the TurtleBot's height (0.34 m). Not "touches the floor" (0.12 m): the
+    # bottom of a couch or a person is often hidden behind something nearer or below the image. Blue_Glass stays out: its
+    # base is at 0.40 m on a bucket and higher while carried.
+    max_base_height: 0.35
+    min_points: 40            # valid depth pixels in the mask
 
 spectator_camera:
   prim_path: "/World/SpectatorCamera"

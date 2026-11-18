@@ -1,6 +1,7 @@
 """Physics acceptance tests: friction, robot bumps and the glass transfer in both placement modes. No video.
 
     isaaclab.sh -p scripts/test_physics.py --headless
+    isaaclab.sh -p scripts/test_physics.py --headless --scenario gripper_robot   # the transfer by the mobile manipulator
 
 Exits with status 1 when a check fails. The bump test drives the robot into Bucket_2 with the glass on its lid:
     edge (eccentricity 0.85):   a bump at 0.25-0.35 m/s must knock the glass off (it lands on the floor or on the robot)
@@ -20,6 +21,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 parser = argparse.ArgumentParser(description="Physics acceptance tests for AlleyEnv.")
 parser.add_argument("--config", default=os.path.join(PROJECT_ROOT, "configs", "env_config.yaml"))
+parser.add_argument("--scenario", choices=["person", "gripper_robot"], default=None, help="Who moves the glass (default: the config's).")
 parser.add_argument("--push_time", type=float, default=0.8, help="Seconds the robot keeps driving after first touching the bucket.")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
@@ -164,7 +166,7 @@ def test_transfer(env, mode: str, expected_eccentricity: float) -> None:
         parent = obs_gt["Blue_Glass"]["parent"]
         if not sequence or sequence[-1] != parent:
             sequence.append(parent)
-        top_speed = max(top_speed, float(np.linalg.norm(obs_gt["Person"]["velocity"])))
+        top_speed = max(top_speed, float(np.linalg.norm(obs_gt[env.actor.name]["velocity"])))
         if state == "DONE":
             break
     settle(env, 60)
@@ -172,24 +174,24 @@ def test_transfer(env, mode: str, expected_eccentricity: float) -> None:
     glass = gt["Blue_Glass"]
     print(f"  states: {states}\n  glass parents: {sequence}", flush=True)
     check(states == ["IDLE", "APPROACH_B1", "PICK_GLASS", "CARRY_TO_B2", "PLACE_GLASS", "EXIT", "DONE"] or states == ["APPROACH_B1", "PICK_GLASS", "CARRY_TO_B2", "PLACE_GLASS", "EXIT", "DONE"],
-          "the Person went through every state in order")
-    check(sequence == ["Bucket_1", "Person", "Bucket_2"], f"glass went Bucket_1 -> Person -> Bucket_2 (got {sequence})")
+          f"the {env.actor.name} went through every state in order")
+    check(sequence == ["Bucket_1", env.actor.name, "Bucket_2"], f"glass went Bucket_1 -> {env.actor.name} -> Bucket_2 (got {sequence})")
     ecc = glass["eccentricity_xy"]
     check(ecc is not None and abs(ecc - expected_eccentricity) < 0.02, f"eccentricity on Bucket_2 is {ecc}, should be {expected_eccentricity}")
     for name, position in home.items():
         moved = float(np.linalg.norm(xy(env.objects[name]) - position))
         check(moved < 0.005, f"{name} moved {moved * 1000:.1f} mm")
-    check(abs(top_speed - env.actor.speed) < 0.02, f"top walking speed {top_speed:.3f} m/s, configured {env.actor.speed}")
-    end = gt["Person"]["pose"]["position"][:2]
-    target = env.cfg["human_actor"]["exit_path"][-1]
-    check(float(np.hypot(end[0] - target[0], end[1] - target[1])) < 0.01, f"Person stopped at ({end[0]:.3f}, {end[1]:.3f})")
+    check(abs(top_speed - env.actor.speed) < 0.02, f"top speed {top_speed:.3f} m/s, configured {env.actor.speed}")
+    end = gt[env.actor.name]["pose"]["position"][:2]
+    target = env.actor.cfg["exit_path"][-1]
+    check(float(np.hypot(end[0] - target[0], end[1] - target[1])) < 0.01, f"{env.actor.name} stopped at ({end[0]:.3f}, {end[1]:.3f})")
     env.reset()
     gt = env.get_ground_truth_objects()
     check(env.get_actor_state() == "IDLE" and gt["Blue_Glass"]["parent"] == "Bucket_1", "reset() puts the glass back on Bucket_1")
 
 
 def main() -> None:
-    env = AlleyEnv(cfg_path=args_cli.config, device=args_cli.device, enable_spectator_cam=False)
+    env = AlleyEnv(cfg_path=args_cli.config, device=args_cli.device, enable_spectator_cam=False, scenario=args_cli.scenario)
     try:
         env.reset()
         env.actor.enabled = False
@@ -197,7 +199,7 @@ def main() -> None:
         test_bumps(env)
         env.actor.enabled = True
         test_transfer(env, "center", 0.0)
-        test_transfer(env, "edge", env.cfg["human_actor"]["edge_eccentricity"])
+        test_transfer(env, "edge", env.actor.cfg["edge_eccentricity"])
     finally:
         env.close()
     if failures:

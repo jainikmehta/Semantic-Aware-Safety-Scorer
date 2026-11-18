@@ -227,6 +227,18 @@ def vase_hull_profile(radius: float, height: float) -> list[tuple[float, float]]
     return [(0.0, 0.0), (0.60 * radius, 0.0), (radius, 0.37 * height), (0.60 * radius, height), (0.0, height)]
 
 
+def bean_bag_profile(radius: float, height: float, smooth: bool = True) -> list[tuple[float, float]]:
+    """Slumped bean bag: flat on the floor over most of its base, widest just above the floor, a soft dome with a shallow dip
+    where you would sit. radius is the widest point. smooth=False gives the convex outline for the collider."""
+    r, h = radius, height
+    outline = [(0.0, 0.0), (0.85 * r, 0.0), (0.97 * r, 0.05 * h), (1.00 * r, 0.17 * h), (0.95 * r, 0.36 * h), (0.80 * r, 0.58 * h),
+               (0.56 * r, 0.80 * h), (0.28 * r, 0.97 * h), (0.0, 1.0 * h)]
+    if not smooth:
+        return outline
+    profile = smooth_profile(outline[:-1] + [(0.12 * r, 0.92 * h), (0.0, 0.90 * h)], samples_per_segment=8)  # dip on top
+    return [(rr, max(z, 0.0)) for rr, z in profile]  # the spline must not dip below the floor
+
+
 # ------------------------------------------------------------------------------------------------- USD helpers
 def define_mesh(stage, path: str, mesh: MeshData, translation=(0.0, 0.0, 0.0)) -> UsdGeom.Mesh:
     """Author a quad mesh with vertex normals and UVs (primvars:st). Materials with textures need the UVs."""

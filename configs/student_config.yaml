@@ -1,0 +1,37 @@
+# Student risk model: Qwen3-VL-4B with LoRA and a score head (distillation/student.py), trained on the corrected teacher
+# labels (configs/risk_config.yaml, section corrections) with SAM 3's masks as the obstacle queries.
+
+model:
+  backbone: "Qwen/Qwen3-VL-4B-Instruct"
+  max_queries: 8              # obstacles rated per frame in one pass (the dataset has at most 7 marked)
+  instruction: "You are the safety module of a small wheeled robot. Rate how bad it would be to bump into each marked obstacle."
+  lora: {r: 16, alpha: 32, dropout: 0.05}
+  lora_targets: "model\\.language_model\\.layers\\.\\d+\\.(self_attn\\.(q|k|v|o)_proj|mlp\\.(gate|up|down)_proj)"
+  head_hidden: 512
+  attributes: ["soft", "fragile", "carries_fragile", "living"]
+
+data:
+  labels: "v2_corrected"      # v1 trained on v1_hints_corrected (no glass or vase on the couch or armchair)
+  sam_iou: 0.5                # a SAM mask stands for a labelled obstacle when it overlaps it this much
+  sam_share: 0.8              # training: probability of using SAM's mask for an obstacle SAM found (else the exact mask)
+  flip: 0.5                   # horizontal flip of image and masks
+  color_jitter: 0.15
+  workers: 8
+
+train:
+  epochs: 4
+  batch_size: 8
+  lr: 2.0e-4                  # LoRA and head
+  weight_decay: 0.01
+  warmup_steps: 100
+  loss_weights: {risk: 1.0, rank: 0.5, attributes: 0.2}
+  rank_min_gap: 0.10          # ranking loss on pairs in one frame whose targets differ by at least this
+  huber_delta: 0.10
+  eval_every: 200             # steps
+  seed: 0
+  output: "checkpoints/student_v2"
+
+gate:                         # what the student must reach on the test splits before it replaces the teacher's scores
+  mae: 0.08
+  pair_accuracy: 0.90         # share of obstacle pairs in a frame (targets 0.10+ apart) ranked the right way round
+  latency_ms: 50

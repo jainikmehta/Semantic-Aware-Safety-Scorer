@@ -1,0 +1,8 @@
+# The episode for the proposal figure seen from the controller videos' viewpoint (env_config.yaml spectator_camera:
+# behind and to the side of the robot's start, 80 degree field of view), at a higher resolution.
+extends: env_config.yaml
+
+spectator_camera:
+  hfov_deg: 80.0
+  width: 1920
+  height: 1440
