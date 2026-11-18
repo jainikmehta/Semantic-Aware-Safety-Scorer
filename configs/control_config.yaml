@@ -1,0 +1,42 @@
+# Risk-aware CBF-NMPC (control/cbf_nmpc.py) and the obstacle tracker (control/obstacles.py).
+
+nmpc:
+  horizon: 25                 # steps
+  dt: 0.12                    # s per step: 3 s ahead
+  control_every: 3            # env steps (1/30 s) per solve: the controller runs at 10 Hz
+  max_obstacles: 16           # nearest circles passed to the solver
+  max_speed: 0.30             # m/s, below the Create 3's 0.46 so that the actor's timing still meets the robot in the alley
+  max_reverse: 0.05
+  wall_margin: 0.03           # m between the robot and a wall
+  max_iter: 60
+  goal_tolerance: 0.15        # m: the episode ends here
+  # slack: 2000 / 50 left the robot parked in front of the gap between the vase and Bucket_1 (kinematic test)
+  weights: {position: 1.0, lateral: 0.3, accel: 0.5, alpha: 0.05, omega: 0.2, terminal: 20.0, slack: 60.0, slack_linear: 10.0}
+  risk:                       # how the semantic risk r in [0, 1] shapes each obstacle's barrier
+    contact_margin: 0.03      # m, hard: added to the touching distance whatever the risk (depth noise on the real robot)
+    margin_low: 0.03          # m kept from a risk-0 obstacle (a sofa) ...
+    margin_high: 0.35         # ... up to this at risk 1 (a person); soft, gives way only in a gap too narrow for it
+    gamma_low: 0.15           # CBF decay rate at risk 1: slows the approach early
+    gamma_high: 0.70          # at risk 0: may come close quickly
+
+risk_sources:
+  uniform_risk: 0.5           # baseline: every obstacle the same, no semantics
+  unknown_risk: 0.7           # tracker: low points SAM 3 did not segment
+
+tracker:
+  max_height: 0.35            # m: points the robot could hit
+  max_range: 4.0              # m of depth used for SAM 3 obstacles
+  unknown_range: 2.5          # m of depth searched for unknown obstacles
+  min_points: 25
+  unknown_min_cells: 6
+  wall_band: 0.12             # m along each wall where unsegmented points belong to the wall
+  associate_m: 0.35           # m: a detection joins the track with a floor point this close
+  static_m: 0.03              # m of centre movement per update below which a track counts as still
+  velocity_alpha: 0.3
+  risk_alpha: 0.3             # (tracker v1) running average of the student's score
+  risk_alpha_up: 0.5          # running average of the student's score when it rises ...
+  risk_alpha_down: 0.1        # ... and when it falls: about 1 s (10 updates) to clear a risk
+  forget_s: 60.0
+  min_seen: 2                 # frames before a track becomes an obstacle
+  max_piece: 0.3              # m: longer point sets get several circles
+  pad: 0.03                   # m added around a footprint (depth noise, the hidden edges)

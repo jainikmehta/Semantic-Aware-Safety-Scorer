@@ -1,6 +1,7 @@
 """Run the alley episode with a scorer plugged in and log its scores next to ground truth.
 
     isaaclab.sh -p scripts/evaluate_scorer.py --scorer examples.depth_scorer:DepthScorer --headless
+    isaaclab.sh -p scripts/evaluate_scorer.py --scorer examples.depth_scorer:DepthScorer --headless --scenario gripper_robot
 
 Writes outputs/<scorer>_scores.csv with one row per step: step, score, label, robot pose, distance from the robot to every
 object (ground truth, for analysis only) and the glass eccentricity. The scorer never sees the ground truth.
@@ -22,7 +23,8 @@ parser.add_argument("--scorer", required=True, help="'package.module:ClassName' 
 parser.add_argument("--steps", type=int, default=1050, help="Number of 1/30 s steps (1050 reaches the goal at 0.2 m/s).")
 parser.add_argument("--v_cmd", type=float, default=0.20)
 parser.add_argument("--w_cmd", type=float, default=0.0)
-parser.add_argument("--output", default=None, help="CSV path (default outputs/<ClassName>_scores.csv).")
+parser.add_argument("--scenario", choices=["person", "gripper_robot"], default=None, help="Who moves the glass (default: the config's).")
+parser.add_argument("--output", default=None, help="CSV path (default outputs/<ClassName>_<scenario>_scores.csv).")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 args_cli.enable_cameras = True
@@ -38,10 +40,9 @@ from perception.scorer import as_result, load_scorer  # noqa: E402
 
 def main() -> int:
     scorer = load_scorer(args_cli.scorer)
-    out_path = args_cli.output or os.path.join(PROJECT_ROOT, "outputs", f"{args_cli.scorer.split(':')[-1]}_scores.csv")
+    env = AlleyEnv(scenario=args_cli.scenario)
+    out_path = args_cli.output or os.path.join(PROJECT_ROOT, "outputs", f"{args_cli.scorer.split(':')[-1]}_{env.scenario}_scores.csv")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-
-    env = AlleyEnv()
     try:
         obs = env.reset()
         scorer.reset()

@@ -1,0 +1,136 @@
+# Semantic risk scores: the rubric, the teacher model that applies it, and the dataset the teacher labels.
+#
+# Risk is a number in [0, 1] per obstacle: how bad it would be if the TurtleBot bumped into it (1 = worst). It is a property
+# of the obstacle and of what it carries, not of how near it is; distance enters later, in the controller.
+
+rubric:
+  version: 2                  # v2 (2026-11-11, after the v1 review): robots are hard obstacles, glass on the floor breaks
+  # The teacher gets `system` as its system prompt. Edit the text to change how the labels come out, then bump `version`:
+  # labels are stored per version, so old ones are kept.
+  system: |
+    You are the safety module of a TurtleBot 4, a small wheeled indoor robot: a disc 34 cm across and 34 cm tall that weighs about 4 kg and drives at up to 0.46 m/s (a third of walking pace). You look at one image from its front camera, mounted 24 cm above the floor, and rate how bad it would be if the robot bumped into each marked obstacle.
+
+    Risk is a number from 0.00 to 1.00: the severity of the worst plausible consequence of a bump at full speed. It does not depend on how near the obstacle is or on how likely a collision is; another module handles distance.
+
+    Consider, in this order:
+    1. People and animals. Any chance of hurting, tripping or startling a living being outweighs everything else.
+    2. What the obstacle carries. Look at what stands on it, lies in it, leans on it or is held by it. If a bump could make something fragile fall, spill or break, the obstacle inherits that risk, even if it is harmless itself.
+    3. The obstacle itself. Fragile, valuable or easily toppled things rate high; sturdy things rate low.
+    4. The robot. Hard, heavy or sharp obstacles can damage the robot; soft, yielding ones cannot.
+    5. Whether the damage can be undone. Broken glass is permanent; a pushed box is not.
+
+    Scale:
+    0.00-0.15 negligible. Soft, yielding things with nothing fragile on them: a cushion, a mattress, upholstered furniture.
+    0.15-0.35 minor. Sturdy rigid things with nothing fragile on them, which may get pushed or scuffed: an empty crate, a cardboard box, a plastic bin.
+    0.35-0.60 moderate. Things that could tip over, spill or be damaged: a floor lamp, a potted plant.
+    0.60-0.80 serious. Hard, heavy machines that would damage the robot and could be damaged themselves, such as another robot or a cart; anything that carries or supports something fragile that could fall, such as a side table with a cup on it.
+    0.80-0.90 very serious. Fragile things standing on the floor, which the robot would hit directly: a glass, a vase, a bottle. They will break or spill. A machine that is holding something fragile.
+    0.85-1.00 severe. People and animals, and anything whose failure could injure someone.
+
+    Judge only by what is visible in this image. If an obstacle seems to carry something but you cannot tell what, say so and rate it cautiously.
+  # Per-obstacle fields, in the order the teacher writes them: the description and the reason come before the number.
+  fields:
+    name: "what the obstacle is, 2 to 5 words"
+    carries: "what stands on it, lies in it or is held by it, as far as visible; \"nothing\" if nothing"
+    soft: "true if it yields when bumped (upholstery, fabric, foam)"
+    fragile: "true if the obstacle itself would probably break or be damaged"
+    carries_fragile: "true if something fragile is on it, in it or held by it"
+    living: "true for people and animals"
+    reason: "the worst plausible consequence of a bump, at most 20 words"
+    risk: "0.00 to 1.00, two decimals"
+
+teacher:
+  # OpenAI-compatible endpoint of the lab's LLM service (see /opt/llm/service/USER_GUIDE.pdf). The key is read from key_file.
+  base_url: "http://localhost:8080/v1"
+  key_file: "~/.config/llm/api_key"
+  model: "qwen3-vl-32b"
+  parallel: 4                 # the service runs 4 requests at a time; more only queue
+  temperature: 0.0
+  timeout_s: 300
+  retries: 4
+  image_scale: 2              # the 640 x 480 frame is enlarged for the teacher so that small things get more image tokens
+  close_up_size: 512          # px: each obstacle is also shown alone, cut out with its surroundings and enlarged to about this size
+  hints: true                 # also tell the teacher what the simulator knows stands on each obstacle or is held by it (if
+                              # visible). Without it the teacher missed the glass on a bucket in 73 % of frames (pilot, 64 frames)
+  marks:                      # which objects get a number: the ones the robot could hit
+    max_base_height: 0.35     # m, as sam3.ground.max_base_height: the object's base is below the top of the robot
+    min_pixels: 300           # visible pixels of the object in the 640 x 480 image
+    min_visible_share: 0.25   # and at least this share of the object is visible (estimated), so that slivers behind other
+    always_from_pixels: 4000  # objects are not rated; from this many pixels it is rated whatever the share (a close-up view)
+    min_carried_pixels: 40    # a carried object counts as visible evidence from this many pixels
+
+dataset:
+  root: "data/risk_v1"
+  seed: 7
+  min_pixels: 300             # a frame is kept if at least one obstacle has this many visible pixels
+  static:                     # random layouts, robot placed at random viewpoints; per scenario
+    layouts: {train: 100, val: 10, test: 10, test_heldout: 10}
+    views_per_layout: 12
+    presence: {Bucket_1: 0.85, Bucket_2: 0.85, Blue_Glass: 0.85, Glass_Vase: 0.75, Soft_Couch: 0.6, Soft_Chair: 0.6, Ottoman: 0.6, Bean_Bag: 0.6}
+    actor_present: 0.8
+    glass_on: {Bucket_1: 0.30, Bucket_2: 0.30, floor: 0.15, actor: 0.25}   # among the options that exist in the layout
+    vase_on_bucket: 0.3       # otherwise on the floor
+    heldout_supports: ["Ottoman"]   # split test_heldout only: the glass or the vase stands on it
+    max_eccentricity: {Blue_Glass: 0.6, Glass_Vase: 0.2}   # how far off the centre of a bucket's lid, in bucket radii
+    wall_aligned: 0.7         # share of furniture placed with its back against a wall
+    min_gap: 0.10             # m between any two footprints
+    view_distance: [0.55, 3.8]   # m from the robot to the object it looks at
+    robot_clearance: 0.06     # m between the robot and any footprint
+  extra:                      # added after student v1 learned "bucket with a glass" instead of "anything with something
+                              # fragile on top": the glass or the vase on the seat of the couch or the armchair. Per scenario.
+    layouts: {train: 40, val: 4, test: 4}
+    supports: ["Soft_Couch", "Soft_Chair"]   # the ottoman stays held out (test_heldout)
+    vase_share: 0.4
+  transfer:                   # the configured scene with the actor carrying the glass; per scenario
+    episodes: {train: 5, test: 1}
+    steps: 1050
+    frame_every: 15           # one frame per 0.5 s
+    v_cmd: 0.20               # the transfer is timed for this speed
+    movable: ["Glass_Vase", "Soft_Chair", "Ottoman", "Bean_Bag"]   # everything else is part of the actor's routes
+    keep_nominal: 0.4
+    absent: 0.2               # otherwise moved to a random free place
+    min_gap: 0.08
+    robot_lane_half_width: 0.26
+    route_clearance: 0.10
+  appearance:
+    dome_factor: [0.6, 1.4]   # times the configured intensity
+    sun_factor: [0.5, 1.5]
+
+corrections:                  # scripts/correct_risk_labels.py: the label set the student trains on
+  # the teacher's label sets to correct (labels/<set>/), in order: a frame in several keeps the first one's label. v1: the
+  # first 3,908 frames; v2 (rubric v2): the extra layouts added for student v2.
+  sources: ["v1_hints", "v2_hints"]
+  output: "v2_corrected"      # labels/<output>/: what the student trains on
+  # The reviewed policy: the range each kind of obstacle may be rated in. A teacher rating outside it is clipped to the
+  # range (or replaced by the typical rating when the teacher described a different object); inside it, it is kept.
+  # v1 review (2026-11-11): another robot is a hard, heavy object that can damage the TurtleBot, and a glass on the floor
+  # will almost certainly break or spill; the teacher rated both too low.
+  bands:
+    couch: [0.00, 0.15]
+    armchair: [0.00, 0.15]
+    ottoman: [0.00, 0.15]
+    bean bag: [0.00, 0.15]
+    bucket: [0.15, 0.35]
+    gripper robot: [0.65, 0.75]
+    gripper robot carrying fragile: [0.80, 0.90]   # holding the glass: worse than the robot alone
+    carrying fragile: [0.60, 0.85]                 # a bucket or the ottoman with a glass or vase on it
+    glass vase: [0.80, 0.90]                       # on the floor
+    drinking glass: [0.80, 0.90]                   # on the floor
+    person: [0.90, 1.00]
+    person carrying fragile: [0.90, 1.00]
+
+review:
+  frames: 64                  # labelled first and shown on the review sheet, spread over every kind of object and arrangement
+  # The band of the rubric's scale each obstacle should fall into. Only used to check the teacher (review sheet and
+  # statistics), never shown to it and never used as a label.
+  expected:
+    couch: [0.00, 0.15]
+    armchair: [0.00, 0.35]           # upholstered, but on a wooden frame
+    ottoman: [0.00, 0.15]
+    bean bag: [0.00, 0.15]
+    bucket: [0.15, 0.35]
+    gripper robot: [0.65, 0.75]
+    glass vase on the floor: [0.80, 0.90]
+    drinking glass on the floor: [0.80, 0.90]
+    carrying_fragile: [0.60, 0.85]   # anything with a glass or vase on it or in its gripper
+    person: [0.85, 1.00]             # with or without the glass

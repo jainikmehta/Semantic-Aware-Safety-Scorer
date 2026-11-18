@@ -1,0 +1,73 @@
+{
+ "checkpoint": "/home/mehtaj3/Documents/scripts/Semantic Aware Safety Scorer/checkpoints/student_v1/best",
+ "scenario": "person",
+ "scene": "vase_on_ottoman",
+ "video": "/home/mehtaj3/Documents/scripts/Semantic Aware Safety Scorer/recordings/risk_student_v1_person_vase_on_ottoman.mp4",
+ "sam_ms_median": 99.125,
+ "student_ms_median": 72.10499999999999,
+ "by_state": {
+  "armchair": {
+   "frames": 201,
+   "inside_range": 1.0,
+   "risk_mean": 0.08896255720202899,
+   "risk_min": 0.02517884224653244,
+   "risk_max": 0.1250653713941574
+  },
+  "bean bag": {
+   "frames": 574,
+   "inside_range": 0.9930313588850174,
+   "risk_mean": 0.08268857584061111,
+   "risk_min": 0.0008559006964787841,
+   "risk_max": 0.9263036847114563
+  },
+  "bucket": {
+   "frames": 558,
+   "inside_range": 0.9731182795698925,
+   "risk_mean": 0.21526791539884382,
+   "risk_min": 0.14804719388484955,
+   "risk_max": 0.8300437331199646
+  },
+  "bucket + drinking glass": {
+   "frames": 477,
+   "inside_range": 0.9350104821802935,
+   "risk_mean": 0.8106440826938087,
+   "risk_min": 0.11436853557825089,
+   "risk_max": 0.9149009585380554
+  },
+  "couch": {
+   "frames": 657,
+   "inside_range": 0.9406392694063926,
+   "risk_mean": 0.14251566763621396,
+   "risk_min": 0.028007520362734795,
+   "risk_max": 0.8116759657859802
+  },
+  "ottoman": {
+   "frames": 87,
+   "inside_range": 1.0,
+   "risk_mean": 0.011018639916136604,
+   "risk_min": 0.00020342698553577065,
+   "risk_max": 0.16885694861412048
+  },
+  "ottoman + glass vase": {
+   "frames": 108,
+   "inside_range": 0.0,
+   "risk_mean": 0.03615214636859795,
+   "risk_min": 0.010986941866576672,
+   "risk_max": 0.09534945338964462
+  },
+  "person": {
+   "frames": 827,
+   "inside_range": 0.9939540507859734,
+   "risk_mean": 0.9961924537782081,
+   "risk_min": 0.328529417514801,
+   "risk_max": 0.9999971389770508
+  },
+  "person + drinking glass": {
+   "frames": 146,
+   "inside_range": 1.0,
+   "risk_mean": 0.9999420479552387,
+   "risk_min": 0.9997219443321228,
+   "risk_max": 0.9999971389770508
+  }
+ }
+}

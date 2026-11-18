@@ -18,10 +18,13 @@ omni.*.log
 kit/
 shadercache/
 
-# Video outputs & recordings
-recordings/*.mp4
-recordings/*.avi
-recordings/*.png
+# Video outputs & recordings (also in sub-folders such as recordings/archive_*/)
+recordings/**/*.mp4
+recordings/**/*.avi
+recordings/**/*.png
+
+# Zipped copy of Media/ for sending by mail (Media/ itself is tracked)
+Media.zip
 
 # Robot USD generated from the URDF at first launch
 assets/turtlebot4/usd/

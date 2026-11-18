@@ -1,0 +1,7 @@
+# The out-of-distribution scene (env_config_ood.yaml) with the larger spectator camera of env_config_media.yaml.
+extends: env_config_ood.yaml
+
+spectator_camera:
+  hfov_deg: 60.0
+  width: 1920
+  height: 1080

@@ -249,10 +249,20 @@ class PersonRig:
         self.lean = 0.0  # radians, how far the back is bent to reach the glass
         self.reset()
 
-    def reset(self) -> None:
+    def reset(self, actor=None) -> None:
         self.gait_phase = 0.0
         self.idle_time = 0.0
         self.walk_weight = 0.0
+
+    # ------------------------------------------------------------------------------------------------- actor hooks
+    def physics_update(self, dt: float, actor) -> None:
+        """The character is only a visual: nothing to do per physics step."""
+
+    def post_physics_step(self, dt: float, actor) -> None:
+        pass
+
+    def visual_update(self, dt: float, actor) -> None:
+        self.update(dt, actor.xy, actor.yaw, actor.speed_now, actor.yaw_rate, actor.hand_target, actor.hand_weight)
 
     # ------------------------------------------------------------------------------------------------- pose layers
     @staticmethod

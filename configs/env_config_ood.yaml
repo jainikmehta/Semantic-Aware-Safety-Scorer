@@ -1,0 +1,27 @@
+# Out-of-distribution test scene: the same alley layout with objects and materials the student model never saw in
+# training. Everything not listed here comes from env_config.yaml.
+extends: env_config.yaml
+
+alley:
+  wall_material: {mdl: "NVIDIA/Materials/Base/Masonry/Stucco.mdl", tile_m: 2.0}
+  cap_material: {mdl: "NVIDIA/Materials/Base/Stone/Granite_Dark.mdl", tile_m: 1.5}
+  floor_material: {mdl: "NVIDIA/Materials/Base/Wood/Oak_Planks.mdl", tile_m: 2.0}
+
+lighting:
+  dome_hdri: "NVIDIA/Assets/Skies/Clear/noon_grass_4k.hdr"
+
+objects:
+  Bucket_1:                    # a closed-head steel pail instead of the orange plastic bucket
+    usd: "NVIDIA/Assets/DigitalTwin/Assets/Warehouse/Storage/Pails/ClosedHead_A/ClosedHeadPail_A01_PR_V_NVD_01.usd"
+  Bucket_2:                    # a plastic pail of another make
+    usd: "NVIDIA/Assets/DigitalTwin/Assets/Warehouse/Storage/Pails/Plastic_A/PlasticPail_A02_PR_V_NVD_01.usd"
+  Soft_Couch:                  # a fabric sofa instead of the brown leather one
+    usd: "NVIDIA/Assets/ArchVis/Residential/Furniture/FurnitureSets/Crestwood/Crestwood_Sofa.usd"
+    yaw_deg: "auto"
+    depth: 0.62                # longer than the leather sofa at the same depth: smaller and moved along the wall to keep
+    pos: [1.20, 0.73, 0.0]     # the actors' routes clear
+  Soft_Chair:
+    usd: "NVIDIA/Assets/ArchVis/Residential/Furniture/FurnitureSets/Appleseed/Appleseed_Chair.usd"
+    yaw_deg: "auto"
+  Ottoman:
+    usd: "NVIDIA/Assets/ArchVis/Residential/Furniture/Chairs/Bevo_Ottoman.usd"

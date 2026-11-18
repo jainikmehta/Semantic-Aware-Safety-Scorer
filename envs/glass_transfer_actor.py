@@ -1,16 +1,21 @@
-"""The Person: a scripted human who carries Blue_Glass from Bucket_1 to Bucket_2 while the robot drives down the alley.
+"""The actor of a scenario: someone or something that carries Blue_Glass from Bucket_1 to Bucket_2 while the robot drives down
+the alley. Two bodies share this state machine (see `scenario` in the config):
 
-    IDLE         waits at the alcove until the robot crosses trigger_robot_x
-    APPROACH_B1  walks to a spot beside Bucket_1 and turns to face the glass
-    PICK_GLASS   reaches for the glass and lifts it to the carry pose; its parent becomes "Person" when the hand closes
-    CARRY_TO_B2  walks across the alley to a spot beside Bucket_2
-    PLACE_GLASS  lowers the glass onto the bucket's lid, releases it to physics and takes the hand back
-    EXIT         walks around Bucket_2 to behind the goal
+    person         the Person, a skinned character (envs/person_rig.py)
+    gripper_robot  a mobile manipulator: Clearpath Jackal base, UR10e arm, Robotiq 2F-140 gripper (envs/gripper_robot_rig.py)
+
+    IDLE         waits until the robot crosses trigger_robot_x
+    APPROACH_B1  moves to a spot beside Bucket_1 and turns to face the glass
+    PICK_GLASS   reaches for the glass, closes the hand or gripper and lifts it to the carry pose; its parent becomes the actor
+    CARRY_TO_B2  moves across the alley to a spot beside Bucket_2
+    PLACE_GLASS  lowers the glass onto the bucket's lid, opens the hand or gripper, releases it to physics and retracts
+    EXIT         moves out of the way
     DONE         stands still
 
-The Person is a kinematic body, so anything it touches gets pushed with unlimited force. The routes therefore have to clear
-every object; __init__ checks that and raises if an object was moved into a route. The placement target is computed from the
-bucket's current pose, not from its configured position.
+The actor's collider is a kinematic body, so anything it touches gets pushed with unlimited force. The routes therefore have to
+clear every object; __init__ checks that and raises if an object was moved into a route. A round footprint (the Person) is
+checked as a circle; a rectangular one (the robot) as the rectangle along the route and as its bounding circle where it turns
+on the spot. The placement target is computed from the bucket's current pose, not from its configured position.
 
 The state machine only depends on the robot's x (for the trigger) and the object poses, so a run is deterministic.
 """
@@ -81,19 +86,22 @@ class WalkPath:
         return math.atan2(d[1], d[0])
 
 
-class HumanGlassActor:
-    def __init__(self, env: AlleyEnv):
+class GlassTransferActor:
+    def __init__(self, env: AlleyEnv, name: str, cfg: dict, rig):
+        """name: the actor's key in the ground truth ("Person" or "Gripper_Robot"). rig: the body that shows the motion."""
         self.env = env
-        c = env.cfg["human_actor"]
-        self.cfg = c
+        self.name = name
+        self.cfg = cfg
+        c = cfg
         self.enabled = bool(c["enabled"])
-        self.rig = env.person_rig
-        self.height = c["height"]
+        self.rig = rig
+        self.body_z = c["height"] / 2.0  # centre of the collider
         self.speed, self.accel, self.turn_rate = c["speed"], c["acceleration"], c["turn_rate"]
         self.trigger_x = c["trigger_robot_x"]
         self.placement_mode = c["placement_mode"]
         if self.placement_mode not in ("center", "edge"):
-            raise ValueError(f"human_actor.placement_mode must be 'center' or 'edge', got {self.placement_mode!r}")
+            raise ValueError(f"{name}: placement_mode must be 'center' or 'edge', got {self.placement_mode!r}")
+        self.grasp_time = float(c.get("grasp_time", 0.0))  # closing / opening the gripper; 0 for a hand
         self.spawn_xy = np.array(c["spawn_pos"][:2], float)
         self.paths = {name: WalkPath(c[f"{name}_path"]) for name in ("approach", "carry", "exit")}
         self._check_routes()
@@ -104,32 +112,69 @@ class HumanGlassActor:
         self.reset_state()
 
     # ------------------------------------------------------------------------------------------------- setup
-    def _check_routes(self) -> None:
-        """Nothing may be in the way: the kinematic Person would knock it over and the transfer would fail."""
-        r = self.cfg["radius"] + self.cfg["min_path_clearance"]
+    def footprint_radius(self) -> float:
+        """Radius of the circle the actor sweeps when it turns on the spot."""
+        if "footprint" in self.cfg:
+            return math.hypot(*self.cfg["footprint"]) / 2.0
+        return self.cfg["radius"]
+
+    def _obstacles(self) -> list[tuple]:
         env = self.env
-        obstacles = []
+        out = []
         for name, spec in env.cfg["objects"].items():
             if name == "Blue_Glass":
                 continue
             x, y = spec["pos"][:2]
-            if spec["kind"] == "couch":
+            if env.object_dims[name]["shape_type"] == "box":
                 lx, ly = env.object_dims[name]["size"][:2]
-                obstacles.append((name, "box", x, y, lx / 2.0, ly / 2.0))
+                out.append((name, "box", x, y, lx / 2.0, ly / 2.0))
             else:
                 factor = assets.BUCKET_TOP_RADIUS_FACTOR if spec["kind"] == "bucket" else 1.0
-                obstacles.append((name, "circle", x, y, spec["radius"] * factor, 0.0))
+                out.append((name, "circle", x, y, spec["radius"] * factor, 0.0))
+        return out
+
+    @staticmethod
+    def _gap_to_point(px: float, py: float, obstacle) -> float:
+        _, shape, x, y, a, b = obstacle
+        if shape == "circle":
+            return math.hypot(px - x, py - y) - a
+        return math.hypot(max(abs(px - x) - a, 0.0), max(abs(py - y) - b, 0.0))
+
+    def _footprint_outline(self, xy, heading: float) -> np.ndarray:
+        """Points on the edge of the rectangular footprint, 1 cm apart."""
+        length, width = self.cfg["footprint"]
+        hl, hw = length / 2.0, width / 2.0
+        edge = []
+        for u in np.linspace(-hl, hl, int(length / 0.01) + 1):
+            edge += [(u, -hw), (u, hw)]
+        for v in np.linspace(-hw, hw, int(width / 0.01) + 1):
+            edge += [(-hl, v), (hl, v)]
+        edge = np.asarray(edge)
+        c, s = math.cos(heading), math.sin(heading)
+        return np.asarray(xy) + edge @ np.array([[c, s], [-s, c]])
+
+    def _check_routes(self) -> None:
+        """Nothing may be in the way: the kinematic body would knock it over and the transfer would fail."""
+        clearance = self.cfg["min_path_clearance"]
+        obstacles = self._obstacles()
+        turning = self.footprint_radius()
+        rectangle = "footprint" in self.cfg
         for route, path in self.paths.items():
+            checks = []  # (route position, radius around it or None, outline points)
             for s in np.arange(0.0, path.length, 0.01):
-                px, py = path.at(float(s))
-                for name, shape, x, y, a, b in obstacles:
-                    if shape == "circle":
-                        gap = math.hypot(px - x, py - y) - a
-                    else:
-                        gap = math.hypot(max(abs(px - x) - a, 0.0), max(abs(py - y) - b, 0.0))
-                    if gap < r:
-                        raise ValueError(f"human_actor {route}_path passes {gap - self.cfg['radius']:.3f} m from {name} at ({px:.2f}, {py:.2f}): "
-                                         f"the Person's collider needs {self.cfg['min_path_clearance']} m. Change the route in the config.")
+                p = path.at(float(s))
+                if rectangle:
+                    checks.append((p, 0.0, self._footprint_outline(p, path.heading(float(s)))))
+                else:
+                    checks.append((p, self.cfg["radius"], p[None]))
+            for end in (path.points[0], path.points[-1]):  # turning on the spot at both ends
+                checks.append((end, turning, end[None]))
+            for p, radius, points in checks:
+                for obstacle in obstacles:
+                    gap = min(self._gap_to_point(px, py, obstacle) for px, py in points) - radius
+                    if gap < clearance:
+                        raise ValueError(f"{self.name} {route}_path comes within {gap:.3f} m of {obstacle[0]} at ({p[0]:.2f}, {p[1]:.2f}): "
+                                         f"the actor needs {clearance} m. Change the route in the config.")
 
     def reset_state(self) -> None:
         self.state = ActorState.IDLE
@@ -138,37 +183,54 @@ class HumanGlassActor:
         self.speed_now = 0.0
         self.yaw_rate = 0.0
         self.velocity = np.zeros(2)
+        self.distance = 0.0  # travelled along the routes, for the robot's wheels
         self.path: WalkPath | None = None
         self.path_s = 0.0
         self.t = 0.0  # time in the current state
         self.holding = False
-        self.has_glass = True  # False if the glass was gone from Bucket_1 when the Person reached for it
+        self.has_glass = True  # False if the glass was gone from Bucket_1 when the actor reached for it
         self.glass_pos = np.zeros(3)
         self.glass_vel = np.zeros(3)
         self.lift_start = np.zeros(3)
         self.place_target = np.zeros(3)
         self.hand_weight = 0.0
         self.hand_target: np.ndarray | None = None
+        self.grip = 0.0  # 0 open, 1 closed on the glass
 
     def reset(self) -> None:
         self.reset_state()
         self._set_glass_kinematic(False)
-        self._write_person()
-        self.rig.reset()
+        self._write_body()
+        self.rig.reset(self)
+
+    def stand_at(self, xy, yaw: float, holding: bool = False) -> None:
+        """Dataset snapshots: stand at (xy, yaw) in IDLE, optionally with the glass in the carry pose. Call after reset()."""
+        self.xy = np.array(xy, float)
+        self.yaw = float(yaw)
+        self._stand()
+        if holding:
+            self.holding = True
+            self.glass_pos, self.glass_vel = self.carry_pose(), np.zeros(3)
+            self.hand_weight, self.grip = 1.0, 1.0
+            self.hand_target = self.glass_pos.copy()
+            self._set_glass_kinematic(True)
+            self._write_glass()
+        self._write_body()
+        self.rig.reset(self)
 
     # ------------------------------------------------------------------------------------------------- sim access
     def _set_glass_kinematic(self, kinematic: bool) -> None:
         prim = self.env.stage.GetPrimAtPath(self.env.cfg["objects"]["Blue_Glass"]["prim_path"])
         prim.GetAttribute("physics:kinematicEnabled").Set(kinematic)
 
-    def _write_person(self) -> None:
+    def _write_body(self) -> None:
         half = self.yaw / 2.0
         device = self.env.sim.device
-        pose = [[self.xy[0], self.xy[1], self.height / 2.0, math.cos(half), 0.0, 0.0, math.sin(half)]]
+        pose = [[self.xy[0], self.xy[1], self.body_z, math.cos(half), 0.0, 0.0, math.sin(half)]]
         vel = [[self.velocity[0], self.velocity[1], 0.0, 0.0, 0.0, self.yaw_rate]]
-        person = self.env.objects["Person"]
-        person.write_root_pose_to_sim(torch.tensor(pose, dtype=torch.float32, device=device))
-        person.write_root_velocity_to_sim(torch.tensor(vel, dtype=torch.float32, device=device))
+        body = self.env.objects[self.name]
+        body.write_root_pose_to_sim(torch.tensor(pose, dtype=torch.float32, device=device))
+        body.write_root_velocity_to_sim(torch.tensor(vel, dtype=torch.float32, device=device))
 
     def _write_glass(self) -> None:
         device = self.env.sim.device
@@ -180,10 +242,13 @@ class HumanGlassActor:
         return np.array(self.env.objects[name].data.root_pos_w[0].tolist())
 
     # ------------------------------------------------------------------------------------------------- geometry
-    def _carry_pose(self) -> np.ndarray:
+    def carry_pose(self, xy=None, yaw: float | None = None) -> np.ndarray:
+        """Where the glass is held while carrying, for the actor at (xy, yaw) (default: where it is now)."""
+        xy = self.xy if xy is None else xy
+        yaw = self.yaw if yaw is None else yaw
         forward, left = self.cfg["carry_offset"]
-        c, s = math.cos(self.yaw), math.sin(self.yaw)
-        return np.array([self.xy[0] + forward * c - left * s, self.xy[1] + forward * s + left * c, self.cfg["carry_height"]])
+        c, s = math.cos(yaw), math.sin(yaw)
+        return np.array([xy[0] + forward * c - left * s, xy[1] + forward * s + left * c, self.cfg["carry_height"]])
 
     def placement_target(self) -> np.ndarray:
         """Where the glass goes on Bucket_2, from the bucket's current pose. 'edge' is on the side of the robot's path (y = 0)."""
@@ -219,7 +284,9 @@ class HumanGlassActor:
             remaining = path.length - self.path_s
             target = min(self.speed * aligned, max(math.sqrt(2.0 * self.accel * remaining), 0.05))
             self.speed_now += float(np.clip(target - self.speed_now, -self.accel * dt, self.accel * dt))
+            previous = self.path_s
             self.path_s = min(self.path_s + self.speed_now * dt, path.length)
+            self.distance += self.path_s - previous
             self.xy = path.at(self.path_s)
             self.velocity = self.speed_now * np.array([math.cos(heading), math.sin(heading)])
             return False
@@ -269,11 +336,15 @@ class HumanGlassActor:
 
         elif self.state == ActorState.PICK_GLASS:
             self._stand()
-            if not self.has_glass:  # something knocked it off before the Person got there
+            if not self.has_glass:  # something knocked it off before the actor got there
+                self.hand_target = None
                 self._start_walk(ActorState.CARRY_TO_B2, "carry")
             elif not self.holding:
                 self.hand_weight = _smoothstep(self.t / c["reach_time"])
-                if self.t >= c["reach_time"]:
+                if self.grasp_time > 0.0:
+                    self.grip = _smoothstep((self.t - c["reach_time"]) / self.grasp_time)
+                if self.t >= c["reach_time"] + self.grasp_time:
+                    self.grip = 1.0
                     self.glass_pos = self._position("Blue_Glass")
                     self.lift_start = self.glass_pos.copy()
                     self.glass_vel = np.zeros(3)
@@ -282,7 +353,7 @@ class HumanGlassActor:
                     self.t = 0.0
             else:
                 s = self.t / c["lift_time"]
-                self._move_glass(self._glass_on_path(self.lift_start, self._carry_pose(), s, lifting=True), dt)
+                self._move_glass(self._glass_on_path(self.lift_start, self.carry_pose(), s, lifting=True), dt)
                 if s >= 1.0:
                     self._start_walk(ActorState.CARRY_TO_B2, "carry")
 
@@ -296,7 +367,7 @@ class HumanGlassActor:
                 else:
                     self._start_walk(ActorState.EXIT, "exit")
             elif self.holding:
-                self._move_glass(self._carry_pose(), dt)
+                self._move_glass(self.carry_pose(), dt)
 
         elif self.state == ActorState.PLACE_GLASS:
             self._stand()
@@ -312,8 +383,11 @@ class HumanGlassActor:
                     self.hand_target = self.glass_pos.copy()
                     self.t = 0.0
             else:
-                self.hand_weight = 1.0 - _smoothstep(self.t / c["retract_time"])
-                if self.t >= c["retract_time"]:
+                if self.grasp_time > 0.0:
+                    self.grip = 1.0 - _smoothstep(self.t / self.grasp_time)
+                self.hand_weight = 1.0 - _smoothstep((self.t - self.grasp_time) / c["retract_time"])
+                if self.t >= self.grasp_time + c["retract_time"]:
+                    self.grip = 0.0
                     self.hand_weight = 0.0
                     self.hand_target = None
                     self._start_walk(ActorState.EXIT, "exit")
@@ -323,14 +397,19 @@ class HumanGlassActor:
                 self.state, self.t = ActorState.DONE, 0.0
                 self._stand()
 
-        self._write_person()
+        self._write_body()
         if self.holding:
             self._write_glass()
             self.hand_target = self.glass_pos.copy()
+        self.rig.physics_update(dt, self)
+
+    def post_physics_step(self, dt: float) -> None:
+        """After sim.step(): lets the rig read back what the simulator did."""
+        self.rig.post_physics_step(dt, self)
 
     def update_visual(self, dt: float) -> None:
-        """Pose the character for the next render."""
-        self.rig.update(dt, self.xy, self.yaw, self.speed_now, self.yaw_rate, self.hand_target, self.hand_weight)
+        """Pose the body for the next render."""
+        self.rig.visual_update(dt, self)
 
     # ------------------------------------------------------------------------------------------------- ground truth
     def _support_at(self, position) -> tuple[str | None, float | None]:
@@ -345,7 +424,7 @@ class HumanGlassActor:
     def blue_glass_support(self, objects: dict[str, Any]) -> tuple[str | None, float | None]:
         """(parent, eccentricity_xy) of Blue_Glass. Eccentricity is None unless it stands on a bucket."""
         if self.holding:
-            return "Person", None
+            return self.name, None
         position = objects["Blue_Glass"]["pose"]["position"]
         if position[2] < FLOOR_Z:
             return None, None
